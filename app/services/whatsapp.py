@@ -15,6 +15,24 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _TWILIO_API_BASE = "https://api.twilio.com/2010-04-01"
+OUTSIDE_WINDOW_CODE = 63016
+
+
+def twilio_error_code(exc: BaseException) -> int | None:
+    """Pull Twilio's numeric error code from an HTTP error, if present."""
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    try:
+        body = response.json()
+    except Exception:
+        return None
+    if not isinstance(body, dict):
+        return None
+    try:
+        return int(body["code"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 class WhatsAppService:
@@ -80,6 +98,12 @@ class WhatsAppService:
                 except Exception:
                     pass
                 return result
+        except httpx.HTTPStatusError as e:
+            code = twilio_error_code(e)
+            logger.error("Error sending message to %s: %s", to, e)
+            if code == OUTSIDE_WINDOW_CODE:
+                await self._log_outside_window(to, message)
+            raise
         except httpx.HTTPError as e:
             logger.error("Error sending message to %s: %s", to, e)
             raise
@@ -130,6 +154,65 @@ class WhatsAppService:
             except Exception:
                 pass
             return result
+
+    async def send_business_message(
+        self,
+        to: str,
+        *,
+        body: str,
+        template_sid: str = "",
+        content_variables: dict | None = None,
+    ) -> dict:
+        """
+        Free-form text while the recipient's 24h window is open.
+        Approved template when it is closed. On Twilio 63016, log and retry
+        once with the template if one is configured.
+        """
+        from app.services.session_window import (
+            choose_delivery,
+            get_last_inbound,
+            should_retry_with_template,
+            window_is_open,
+        )
+
+        sid = (template_sid or "").strip()
+        last = await get_last_inbound(to)
+        channel = choose_delivery(
+            window_open=window_is_open(last),
+            template_sid=sid,
+        )
+        if channel == "template":
+            return await self.send_content_template(
+                to, content_sid=sid, content_variables=content_variables
+            )
+        try:
+            return await self.send_text_message(to, body)
+        except httpx.HTTPStatusError as e:
+            if should_retry_with_template(twilio_error_code(e), sid):
+                logger.warning(
+                    "Twilio 63016 for %s; retrying with content template", to
+                )
+                return await self.send_content_template(
+                    to, content_sid=sid, content_variables=content_variables
+                )
+            raise
+
+    async def _log_outside_window(self, to: str, message: str) -> None:
+        try:
+            from app.services.events import log_event
+
+            await log_event(
+                phone=to,
+                role="system",
+                type="error",
+                payload={
+                    "code": OUTSIDE_WINDOW_CODE,
+                    "error": "freeform_outside_window",
+                    "body_preview": (message or "")[:200],
+                },
+            )
+        except Exception:
+            pass
 
 
 whatsapp_service = WhatsAppService()

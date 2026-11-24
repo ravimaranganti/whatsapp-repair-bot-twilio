@@ -9,7 +9,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.config import settings
-from app.models import MODE_AWAITING_FEEDBACK_COMMENT, MODE_IDLE
+from app.models import (
+    MODE_AWAITING_FEEDBACK,
+    MODE_AWAITING_FEEDBACK_COMMENT,
+    MODE_IDLE,
+)
 from app.services.conversation_state import conversation_state_store
 from app.services.events import log_event
 from app.services.pros import pro_store
@@ -120,6 +124,65 @@ async def capture_pending_feedback(
     )
     await conversation_state_store.clear(phone)
     await whatsapp_service.send_text_message(phone, "Feedback saved — thank you!")
+    return True
+
+
+_RATING_BY_PAYLOAD = {
+    "rating_great": 5,
+    "rating_okay": 3,
+    "rating_not_good": 1,
+}
+_RATING_BY_TEXT = {
+    "great": 5,
+    "okay": 3,
+    "ok": 3,
+    "not good": 1,
+    "5": 5,
+    "4": 4,
+    "3": 3,
+    "2": 2,
+    "1": 1,
+}
+
+
+async def handle_followup_rating(phone: str, body: str, payload: str) -> bool:
+    """
+    job_followup quick replies: Great / Okay / Not good.
+    Button ids are static; the job id comes from conversation state set when
+    the follow-up was sent.
+    """
+    pl = (payload or "").strip()
+    rating = _RATING_BY_PAYLOAD.get(pl)
+    state = await conversation_state_store.get(phone)
+    ctx = dict(state.get("context") or {})
+    if rating is None and state.get("mode") == MODE_AWAITING_FEEDBACK:
+        rating = _RATING_BY_TEXT.get((body or "").strip().lower())
+    if rating is None:
+        return False
+
+    job_id = ctx.get("job_id")
+    role = ctx.get("role") or "homeowner"
+    await store_feedback(
+        phone=phone,
+        role=role,
+        kind="job_followup",
+        rating=rating,
+        text=(body or "").strip() or pl,
+        job_id=job_id,
+    )
+    if role == "homeowner" and job_id:
+        try:
+            from app.services.jobs import job_store
+
+            job = await job_store.get_job(job_id)
+            pro_phone = (job or {}).get("selected_pro_phone")
+            if pro_phone:
+                await pro_store.apply_rating(pro_phone, rating)
+        except Exception as e:
+            logger.warning("pro rating update failed: %s", e)
+
+    await conversation_state_store.clear(phone)
+    await whatsapp_service.send_text_message(phone, "Thanks — rating saved.")
     return True
 
 

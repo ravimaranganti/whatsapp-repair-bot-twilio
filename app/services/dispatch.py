@@ -6,12 +6,15 @@ import logging
 import re
 from typing import Any
 
+import httpx
+
 from app.config import settings
 from app.models import (
     MODE_AWAITING_AREA,
     MODE_AWAITING_DISPATCH_CONSENT,
     MODE_AWAITING_PICK,
     MODE_AWAITING_SHARE_NOTES,
+    MODE_AWAITING_SHOW_OPTIONS,
     MODE_IDLE,
     MODE_PRO_AWAITING_DETAILS,
     Diagnosis,
@@ -23,7 +26,14 @@ from app.services.homeowners import homeowner_store
 from app.services.jobs import job_store, resolve_pro_from_pick_payload
 from app.services.matching import select_pros_for_job
 from app.services.pros import pro_store
-from app.services.whatsapp import whatsapp_service
+from app.services.session_window import (
+    choose_delivery,
+    clean_template_value,
+    get_last_inbound,
+    should_retry_with_template,
+    window_is_open,
+)
+from app.services.whatsapp import twilio_error_code, whatsapp_service
 from app.utils.phones import normalize_phone, phone_hash, to_e164
 
 logger = logging.getLogger(__name__)
@@ -225,6 +235,22 @@ async def handle_homeowner_state(
         )
         return True
 
+    if payload == "show_options" or mode == MODE_AWAITING_SHOW_OPTIONS:
+        if payload == "show_options" or low in {"show options", "options"}:
+            job_id = ctx.get("job_id")
+            if job_id:
+                await maybe_send_homeowner_options(job_id, force=True)
+            else:
+                await whatsapp_service.send_text_message(
+                    phone_n,
+                    "Those options expired. Send a photo to start a new request.",
+                )
+            return True
+        await whatsapp_service.send_text_message(
+            phone_n, "Tap *Show options* to see the pros who replied."
+        )
+        return True
+
     if mode == MODE_AWAITING_PICK:
         job_id = ctx.get("job_id")
         if not job_id:
@@ -283,20 +309,34 @@ async def dispatch_job(phone: str, ctx: dict[str, Any]) -> None:
         return
 
     await job_store.set_state(job_id, "dispatched")
-    phones = [normalize_phone(p["phone"]) for p in pros]
-    await job_store.update_fields(job_id, alerted_pro_phones=phones)
 
     issue = diag.pro_brief.issue
+    alerted: list[str] = []
     for p in pros:
-        await _send_job_alert(p, job_id, trade, issue, diag.severity.value, area_zip)
-        await job_store.upsert_response(
-            job_id, p["phone"], status="alerted"
+        sent = await _send_job_alert(
+            p, job_id, trade, issue, diag.severity.value, area_zip
         )
+        if not sent:
+            continue
+        await job_store.upsert_response(job_id, p["phone"], status="alerted")
         await pro_store.push_pending_alert(p["phone"], job_id)
+        alerted.append(normalize_phone(p["phone"]))
+
+    await job_store.update_fields(job_id, alerted_pro_phones=alerted)
+    if not alerted:
+        await job_store.set_state(job_id, "cancelled")
+        await homeowner_store.update(phone_n, active_job_id=None)
+        await conversation_state_store.clear(phone_n)
+        await whatsapp_service.send_text_message(
+            phone_n,
+            "I couldn't deliver the job alerts just now. "
+            "Please try again in a little while.",
+        )
+        return
 
     await whatsapp_service.send_text_message(
         phone_n,
-        f"Sent to *{len(pros)}* pros. I'll message you as responses come in "
+        f"Sent to *{len(alerted)}* pros. I'll message you as responses come in "
         "(usually within an hour).",
     )
     await conversation_state_store.clear(phone_n)
@@ -305,7 +345,7 @@ async def dispatch_job(phone: str, ctx: dict[str, Any]) -> None:
         role="system",
         type="job_dispatched",
         job_id=job_id,
-        payload={"pro_count": len(pros), "trade": trade},
+        payload={"pro_count": len(alerted), "trade": trade},
     )
 
     # Schedule collection window via Cloud Tasks if configured
@@ -324,34 +364,40 @@ async def _send_job_alert(
     issue: str,
     severity: str,
     area_zip: str,
-) -> None:
+) -> bool:
     to = to_e164(pro["phone"])
-    sid = settings.tpl_job_alert_sid
-    # Variables for Utility template: trade, zip, issue, severity
-    # Docs: Content API content_variables are JSON string keys "1","2",… or named — verify in Console.
-    if sid:
-        variables = {
-            "1": trade,
-            "2": area_zip or "your area",
-            "3": issue[:200],
-            "4": severity,
-        }
-        try:
-            await whatsapp_service.send_content_template(
-                to, content_sid=sid, content_variables=variables
-            )
-            return
-        except Exception as e:
-            logger.warning("Template job_alert failed, falling back to freeform: %s", e)
-
-    # Fallback freeform (works inside 24h session if pro messaged us; may fail outside)
-    await whatsapp_service.send_text_message(
-        to,
-        f"New *{trade}* request near {area_zip or 'Houston'}: {issue}\n"
-        f"Severity: {severity}\n\n"
-        f"Reply *Interested* or *Not available* "
-        f"(ref {job_id}).",
-    )
+    trade_v = clean_template_value(trade, "repair")
+    zip_v = clean_template_value(area_zip, "your area", limit=32)
+    issue_v = clean_template_value(issue, "home repair", limit=200)
+    severity_v = clean_template_value(severity, "medium", limit=32)
+    try:
+        await whatsapp_service.send_business_message(
+            to,
+            body=(
+                f"New *{trade_v}* request near {zip_v}: {issue_v}\n"
+                f"Severity: {severity_v}\n\n"
+                f"Reply *Interested* or *Not available* "
+                f"(ref {job_id})."
+            ),
+            template_sid=settings.tpl_job_alert_sid,
+            content_variables={
+                "1": trade_v,
+                "2": zip_v,
+                "3": issue_v,
+                "4": severity_v,
+            },
+        )
+        return True
+    except Exception as e:
+        logger.warning("job alert send failed: %s", e)
+        await log_event(
+            phone=to,
+            role="system",
+            type="error",
+            job_id=job_id,
+            payload={"error": "job_alert_send_failed", "detail": str(e)[:300]},
+        )
+        return False
 
 
 async def handle_pro_alert_response(phone: str, body: str, payload: str) -> bool:
@@ -366,6 +412,10 @@ async def handle_pro_alert_response(phone: str, body: str, payload: str) -> bool
         job_id, status = pl[4:], "interested"
     elif pl.startswith("dec:"):
         job_id, status = pl[4:], "declined"
+    elif pl in {"interested", "yes"}:
+        status = "interested"
+    elif pl in {"not_available", "declined", "no"}:
+        status = "declined"
     elif "not available" in low or low in {"no", "decline", "declined"}:
         status = "declined"
     elif "interested" in low or low in {"yes", "y"}:
@@ -498,16 +548,62 @@ async def maybe_send_homeowner_options(job_id: str, force: bool = False) -> None
 
     lines.append("Reply with *1*, *2*, or *3* (or the name) to choose.")
     homeowner = job["homeowner_phone"]
-    await whatsapp_service.send_text_message(homeowner, "\n".join(lines))
+    body = "\n".join(lines)
+    context = {"job_id": job_id, "option_phones": option_phones}
+    sid = settings.tpl_job_reopen_sid
+    variables = {
+        "1": clean_template_value(len(option_phones), "1", limit=8),
+        "2": clean_template_value(job.get("trade"), "repair", limit=40),
+    }
+    last = await get_last_inbound(homeowner)
+    use_template = (
+        choose_delivery(window_open=window_is_open(last), template_sid=sid)
+        == "template"
+    )
+    if not use_template:
+        try:
+            await whatsapp_service.send_text_message(homeowner, body)
+            await conversation_state_store.set(
+                homeowner, MODE_AWAITING_PICK, context
+            )
+            await log_event(
+                phone=homeowner,
+                role="system",
+                type="options_sent",
+                job_id=job_id,
+                payload={"count": len(option_phones)},
+            )
+            return
+        except Exception as e:
+            if not (
+                isinstance(e, httpx.HTTPStatusError)
+                and should_retry_with_template(twilio_error_code(e), sid)
+            ):
+                logger.warning("options send failed: %s", e)
+                raise
+            use_template = True
+
+    try:
+        await whatsapp_service.send_content_template(
+            homeowner, content_sid=sid.strip(), content_variables=variables
+        )
+    except Exception as e:
+        logger.warning("reopen template failed: %s", e)
+        await log_event(
+            phone=homeowner,
+            role="system",
+            type="error",
+            job_id=job_id,
+            payload={"error": "job_reopen_send_failed", "detail": str(e)[:300]},
+        )
+        return
     await conversation_state_store.set(
-        homeowner,
-        MODE_AWAITING_PICK,
-        {"job_id": job_id, "option_phones": option_phones},
+        homeowner, MODE_AWAITING_SHOW_OPTIONS, context
     )
     await log_event(
         phone=homeowner,
         role="system",
-        type="options_sent",
+        type="options_reopen",
         job_id=job_id,
         payload={"count": len(option_phones)},
     )
@@ -617,13 +713,18 @@ async def _finalize_assignment(
     issue = (job.get("diagnosis") or {}).get("pro_brief", {}).get("issue") or job.get(
         "trade"
     )
-    await whatsapp_service.send_text_message(
-        pro_n,
-        f"You were selected for a *{job.get('trade')}* job near {job.get('area_zip')}.\n"
-        f"Issue: {issue}\n"
-        f"Homeowner phone: {to_e164(phone_n)}"
-        f"{notes_text}",
-    )
+    try:
+        await whatsapp_service.send_text_message(
+            pro_n,
+            f"You were selected for a *{job.get('trade')}* job near {job.get('area_zip')}.\n"
+            f"Issue: {issue}\n"
+            f"Homeowner phone: {to_e164(phone_n)}"
+            f"{notes_text}",
+        )
+    except Exception as e:
+        # No template for this message: it includes a phone number.
+        # 63016 is already logged by send_text_message.
+        logger.warning("selected-pro notice failed: %s", e)
 
     await job_store.upsert_response(job_id, pro_n, status="selected")
     for other in job.get("alerted_pro_phones") or []:
@@ -653,26 +754,28 @@ async def _finalize_assignment(
 
 
 async def _send_not_selected(pro_phone: str, job: dict[str, Any]) -> None:
-    sid = settings.tpl_job_not_selected_sid
     to = to_e164(pro_phone)
-    if sid:
-        try:
-            await whatsapp_service.send_content_template(
-                to,
-                content_sid=sid,
-                content_variables={
-                    "1": job.get("trade") or "repair",
-                    "2": job.get("area_zip") or "your area",
-                },
-            )
-            return
-        except Exception as e:
-            logger.warning("not_selected template failed: %s", e)
-    await whatsapp_service.send_text_message(
-        to,
-        f"Thanks for responding to the {job.get('trade')} request near "
-        f"{job.get('area_zip')}. The homeowner chose another pro this time.",
-    )
+    trade = clean_template_value(job.get("trade"), "repair", limit=40)
+    area = clean_template_value(job.get("area_zip"), "your area", limit=32)
+    try:
+        await whatsapp_service.send_business_message(
+            to,
+            body=(
+                f"Thanks for responding to the {trade} request near {area}. "
+                "The homeowner chose another pro for this job."
+            ),
+            template_sid=settings.tpl_job_not_selected_sid,
+            content_variables={"1": trade, "2": area},
+        )
+    except Exception as e:
+        logger.warning("not_selected send failed: %s", e)
+        await log_event(
+            phone=to,
+            role="system",
+            type="error",
+            job_id=job.get("job_id"),
+            payload={"error": "not_selected_send_failed", "detail": str(e)[:300]},
+        )
 
 
 async def on_collection_window_closed(job_id: str) -> None:

@@ -228,27 +228,35 @@ async def tasks_job_followup(request: Request):
     job = await job_store.get_job(job_id)
     if not job or job.get("followup_sent"):
         return {"ok": True, "skipped": True}
-    sid = settings.tpl_job_followup_sid
+    from app.models import MODE_AWAITING_FEEDBACK
+    from app.services.conversation_state import conversation_state_store
+    from app.services.session_window import clean_template_value
+    from app.utils.phones import normalize_phone
+
+    homeowner = normalize_phone(job.get("homeowner_phone") or "")
+    trade = clean_template_value(job.get("trade"), "repair", limit=40)
+    when = clean_template_value((job.get("created_at") or "")[:10], "today", limit=32)
     for role_phone in {job.get("homeowner_phone"), job.get("selected_pro_phone")}:
         if not role_phone:
             continue
-        if sid:
-            try:
-                await whatsapp_service.send_content_template(
-                    role_phone,
-                    content_sid=sid,
-                    content_variables={
-                        "1": job.get("trade") or "repair",
-                        "2": (job.get("created_at") or "")[:10],
-                    },
-                )
-                continue
-            except Exception:
-                pass
-        await whatsapp_service.send_text_message(
+        role = "homeowner" if normalize_phone(role_phone) == homeowner else "pro"
+        try:
+            await whatsapp_service.send_business_message(
+                role_phone,
+                body=(
+                    f"How did the {trade} job on {when} go? "
+                    "Reply Great, Okay, or Not good."
+                ),
+                template_sid=settings.tpl_job_followup_sid,
+                content_variables={"1": trade, "2": when},
+            )
+        except Exception as e:
+            logger.warning("follow-up send failed for %s: %s", role, e)
+            continue
+        await conversation_state_store.set(
             role_phone,
-            f"How did the {job.get('trade')} job go? Reply with a rating 1-5 "
-            "and an optional comment. Or send FEEDBACK anytime.",
+            MODE_AWAITING_FEEDBACK,
+            {"job_id": job_id, "role": role},
         )
     await job_store.update_fields(job_id, followup_sent=True)
     return {"ok": True}

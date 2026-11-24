@@ -12,6 +12,7 @@ from app.models import (
     MODE_AWAITING_DISPATCH_CONSENT,
     MODE_AWAITING_FEEDBACK_COMMENT,
     MODE_AWAITING_PICK,
+    MODE_AWAITING_SHOW_OPTIONS,
     MODE_PRO_AWAITING_DETAILS,
     MODE_PRO_ONBOARDING,
     MessageContent,
@@ -44,6 +45,9 @@ async def process_message(message: MessageContent, sender: str):
     """Main entry after webhook ack / task dequeue."""
     try:
         phone = normalize_phone(sender)
+        from app.services.session_window import record_inbound
+
+        await record_inbound(phone)
         await log_event(
             phone=phone,
             role="homeowner",
@@ -71,6 +75,13 @@ async def process_message(message: MessageContent, sender: str):
         )
 
         if await handle_feedback_keyword(phone, message.body or ""):
+            return
+
+        from app.services.feedback import handle_followup_rating
+
+        if await handle_followup_rating(
+            phone, message.body or "", message.button_payload or ""
+        ):
             return
 
         state = await conversation_state_store.get(phone)
@@ -116,10 +127,11 @@ async def process_message(message: MessageContent, sender: str):
         if mode in {
             MODE_AWAITING_DISPATCH_CONSENT,
             MODE_AWAITING_PICK,
+            MODE_AWAITING_SHOW_OPTIONS,
             "awaiting_area",
             "awaiting_share_notes",
             "awaiting_new_issue_confirm",
-        }:
+        } or (message.button_payload or "") == "show_options":
             if await handle_homeowner_state(
                 phone, message.body or "", payload, state
             ):
