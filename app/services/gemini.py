@@ -71,7 +71,13 @@ availability, and rate. Only list professionals who serve that area.
 - Keep replies concise (2-4 sentences or a short list). No walls of text.
 - If they need a visual diagnosis, ask them to send a clear photo.
 - Reference earlier conversation context when relevant.
-- If you are unsure about something, say so honestly."""
+- If you are unsure about something, say so honestly.
+- This chat keeps short-term history and long-term service notes for the customer. \
+When they ask you to remember something useful for a home visit (gate/door codes, \
+unit number, preferred times, prior issues), acknowledge it and use it later. \
+If the number or note appears in Conversation so far or Long-term facts, answer \
+from that — do not say you cannot remember personal details. Do not invent codes \
+or facts that are not in the provided context."""
 
 
 class GeminiService:
