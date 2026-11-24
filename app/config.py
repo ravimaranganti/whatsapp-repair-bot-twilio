@@ -25,6 +25,13 @@ class Settings(BaseSettings):
         description="Twilio WhatsApp sender number, e.g. whatsapp:+14155238886",
     )
 
+    # Public HTTPS base URL used for Twilio signature validation (no trailing slash).
+    # On Cloud Run set to https://<service>-xxxxx.run.app — must match the webhook URL Twilio calls.
+    public_base_url: str = Field(
+        default="",
+        description="Public base URL of this service for Twilio RequestValidator",
+    )
+
     # Gemini AI credentials
     gemini_api_key: str = Field(default="", description="Google Gemini API key")
 
@@ -54,9 +61,73 @@ class Settings(BaseSettings):
         description="Vertex AI region (must match Reasoning Engine location).",
     )
 
+    # Phase 0 — pilot controls
+    pilot_allowlist: str = Field(
+        default="",
+        description="Comma-separated E.164 numbers allowed in the pilot. Empty = allow all (dev).",
+    )
+    dispatch_enabled: bool = Field(
+        default=False,
+        description="Feature flag: send pro job alerts / brokered dispatch",
+    )
+    feedback_enabled: bool = Field(
+        default=False,
+        description="Feature flag: DIY/job ratings and freeform feedback",
+    )
+    skip_twilio_signature: bool = Field(
+        default=False,
+        description="Skip X-Twilio-Signature checks (local curl tests only).",
+    )
+
+    # Phase 3 — pro join
+    pro_join_code: str = Field(
+        default="",
+        description="Optional JOIN <code>; when set, pros with the code bypass allowlist",
+    )
+
+    # Phase 4 — dispatch
+    max_pros_per_job: int = Field(default=4, ge=1, le=10)
+    collection_window_min: int = Field(default=60, ge=5, le=1440)
+
+    # Twilio Content Template SIDs (submit via Content Template Builder; Utility category)
+    tpl_job_alert_sid: str = Field(default="", description="job_alert Content SID")
+    tpl_job_not_selected_sid: str = Field(
+        default="", description="job_not_selected Content SID"
+    )
+    tpl_job_followup_sid: str = Field(default="", description="job_followup Content SID")
+    tpl_job_reopen_sid: str = Field(default="", description="job_reopen Content SID (optional)")
+
+    # Phase 5
+    operator_phone: str = Field(
+        default="",
+        description="E.164 phone that receives the weekly digest",
+    )
+
+    # Optional Cloud Tasks (preferred over in-process background work)
+    # When unset, webhook uses FastAPI BackgroundTasks.
+    # Tradeoff: requires Cloud Run CPU always allocated (--no-cpu-throttling), already set in cloudbuild.yaml.
+    cloud_tasks_queue: str = Field(
+        default="",
+        description="Cloud Tasks queue id, e.g. whatsapp-inbound. Empty = in-process background task.",
+    )
+    cloud_tasks_location: str = Field(default="us-central1")
+    task_handler_audience: str = Field(
+        default="",
+        description="OIDC audience for /tasks/* (usually the Cloud Run service URL).",
+    )
+
     # Server configuration — Cloud Run injects PORT=8080
     port: int = Field(default=8080, description="Server port")
     log_level: str = Field(default="INFO", description="Logging level")
+
+    def allowlist_numbers(self) -> set[str]:
+        """Normalized digit-only phones from PILOT_ALLOWLIST."""
+        out: set[str] = set()
+        for part in (self.pilot_allowlist or "").split(","):
+            digits = "".join(c for c in part.strip() if c.isdigit())
+            if digits:
+                out.add(digits)
+        return out
 
 
 settings = Settings()

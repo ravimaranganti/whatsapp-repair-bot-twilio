@@ -1,17 +1,25 @@
 """
-Gemini AI Service
-Multimodal image analysis using Google's Gemini 2.5 Flash (google-genai SDK)
+Gemini AI Service — structured diagnosis + tool-calling chat.
+Uses google-genai SDK with system_instruction (not concatenated into user content).
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import os
+import time
+from typing import Any
 
 from google import genai
 from google.genai import types
 
 from app.config import settings
+from app.models.diagnosis import Diagnosis
+from app.prompts.persona import BASE_PERSONA, CHAT_INSTRUCTIONS, DIAGNOSIS_INSTRUCTIONS
+from app.services.chat_tools import TOOL_DECLARATIONS, execute_tool
+from app.services.events import log_event
+from app.services.safety import apply_safety_overrides
 
 logger = logging.getLogger(__name__)
 
@@ -19,265 +27,289 @@ GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_TIMEOUT_SECONDS = 50
 
 
-def _load_professionals_summary() -> str:
-    """Load professionals.json and format it as a compact directory for the prompt."""
-    try:
-        path = os.path.join(os.path.dirname(__file__), "..", "..", "professionals.json")
-        path = os.path.normpath(path)
-        with open(path) as f:
-            data = json.load(f)
-
-        lines = ["AVAILABLE PROFESSIONALS DIRECTORY:"]
-        category_labels = {
-            "plumbers": "Plumbers",
-            "hvac": "HVAC Technicians",
-            "electricians": "Electricians",
-            "handyman": "Handymen",
-        }
-        for category, label in category_labels.items():
-            pros = data.get(category, [])
-            if not pros:
-                continue
-            lines.append(f"\n{label}:")
-            for p in pros:
-                areas = ", ".join(p.get("areas", []))
-                avail = p.get("availability", "Unknown")
-                rate = p.get("hourly_rate", "")
-                rating = p.get("rating", "")
-                phone = p.get("phone", "")
-                lines.append(
-                    f"  • {p['name']} | Phone: {phone} | Areas: {areas} | "
-                    f"Avail: {avail} | Rate: {rate} | Rating: {rating}⭐"
-                )
-        return "\n".join(lines)
-    except Exception as e:
-        logger.warning("Could not load professionals.json: %s", e)
-        return ""
-
-
-_PROFESSIONALS_SUMMARY = _load_professionals_summary()
-
-CHAT_SYSTEM = f"""You are a friendly Houston home repair assistant on WhatsApp. \
-You help customers find the right repair professional and diagnose plumbing, HVAC, \
-electrical, and handyman issues.
-
-{_PROFESSIONALS_SUMMARY}
-
-GUIDELINES:
-- When asked about availability, professionals, or who to call in a specific area, \
-look up the directory above and give a direct, helpful answer with name, phone, \
-availability, and rate. Only list professionals who serve that area.
-- Be conversational and warm — like a knowledgeable friend, not a robot.
-- Keep replies concise (2-4 sentences or a short list). No walls of text.
-- If they need a visual diagnosis, ask them to send a clear photo.
-- Reference earlier conversation context when relevant.
-- If you are unsure about something, say so honestly.
-- This chat keeps short-term history and long-term service notes for the customer. \
-When they ask you to remember something useful for a home visit (gate/door codes, \
-unit number, preferred times, prior issues), acknowledge it and use it later. \
-If the number or note appears in Conversation so far or Long-term facts, answer \
-from that — do not say you cannot remember personal details. Do not invent codes \
-or facts that are not in the provided context."""
+def _diagnosis_schema() -> dict[str, Any]:
+    """JSON schema for Gemini structured output (from Pydantic)."""
+    return Diagnosis.model_json_schema()
 
 
 class GeminiService:
-    """Service for analyzing household issues using Gemini AI"""
-
-    def __init__(self):
+    def __init__(self) -> None:
         self._client: genai.Client | None = None
-
-        self.system_prompt = """You are a Master Plumber and HVAC Technician with 25+ years of experience diagnosing household issues.
-
-You specialize in identifying plumbing problems (leaks, clogs, pipe damage, water heaters, fixtures) and HVAC issues (heating, cooling, ventilation, ductwork, thermostats).
-
-When analyzing an image, provide TWO distinct responses. Be concise — each section must be under 400 characters.
-
-1. HOMEOWNER BRIEF:
-   - 2 sentences max in plain English
-   - What the issue is and any immediate safety concern
-
-2. PRO BRIEF:
-   - Issue, Severity (Low/Medium/High), key parts needed, estimated time
-   - 3-4 bullet points max
-
-Format your response exactly as follows:
-
-**HOMEOWNER BRIEF:**
-[2 sentences max]
-
-**PRO BRIEF:**
-- **Issue:** [problem]
-- **Severity:** [Low/Medium/High]
-- **Parts Needed:** [brief list]
-- **Estimated Time:** [time]
-
-Keep the total response under 800 characters. If the image doesn't show a plumbing or HVAC issue, respond with one sentence saying so.
-"""
 
     @property
     def client(self) -> genai.Client:
-        """Create the Gemini client on first use so startup never crashes."""
         if self._client is None:
             self._client = genai.Client(api_key=settings.gemini_api_key)
         return self._client
+
+    def _context_block(
+        self,
+        prior_turns: list[dict[str, str]] | None,
+        memory_facts: list[str] | None,
+        service_notes: list[str] | None,
+    ) -> str:
+        lines: list[str] = []
+        if service_notes:
+            lines.append("Service notes (homeowner-saved):")
+            for n in service_notes[:15]:
+                lines.append(f"- {n}")
+            lines.append("")
+        if memory_facts:
+            lines.append("Long-term facts (may be stale; prefer recent conversation):")
+            for f in memory_facts[:10]:
+                lines.append(f"- {f}")
+            lines.append("")
+        if prior_turns:
+            lines.append("Recent conversation:")
+            for t in prior_turns[-10:]:
+                role = "User" if t.get("role") == "user" else "Assistant"
+                content = (t.get("content") or "").strip()
+                if len(content) > 400:
+                    content = content[:397] + "..."
+                if content:
+                    lines.append(f"{role}: {content}")
+            lines.append("")
+        return "\n".join(lines)
 
     async def analyze_image(
         self,
         image_bytes: bytes,
         user_message: str = "",
         mime_type: str = "image/jpeg",
-    ) -> dict:
-        """
-        Analyze a household issue from an image.
+        *,
+        prior_turns: list[dict[str, str]] | None = None,
+        memory_facts: list[str] | None = None,
+        service_notes: list[str] | None = None,
+        phone: str | None = None,
+    ) -> Diagnosis:
+        """Multimodal diagnosis → Diagnosis (with safety overrides). Retries once on parse failure."""
+        ctx = self._context_block(prior_turns, memory_facts, service_notes)
+        caption = f"\nUser caption: {user_message}" if user_message else ""
+        prompt_text = (
+            f"{ctx}Analyze the attached photo and return Diagnosis JSON.{caption}"
+        )
+        contents = [
+            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+            prompt_text,
+        ]
+        system = f"{BASE_PERSONA}\n{DIAGNOSIS_INSTRUCTIONS}"
+        last_err: Exception | None = None
 
-        Args:
-            image_bytes:  Image data as bytes
-            user_message: Optional text message from user describing the issue
-            mime_type:    MIME type of the image (default image/jpeg)
+        for attempt in range(2):
+            t0 = time.monotonic()
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self.client.models.generate_content,
+                        model=GEMINI_MODEL,
+                        contents=contents,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system,
+                            response_mime_type="application/json",
+                            response_schema=Diagnosis,
+                        ),
+                    ),
+                    timeout=GEMINI_TIMEOUT_SECONDS,
+                )
+                latency_ms = int((time.monotonic() - t0) * 1000)
+                raw = (response.text or "").strip()
+                diagnosis = Diagnosis.model_validate_json(raw)
+                diagnosis = apply_safety_overrides(diagnosis)
+                await log_event(
+                    phone=phone,
+                    role="system",
+                    type="gemini_call",
+                    payload={
+                        "mode": "diagnosis",
+                        "model": GEMINI_MODEL,
+                        "latency_ms": latency_ms,
+                        "attempt": attempt + 1,
+                        "trade": diagnosis.trade.value,
+                        "severity": diagnosis.severity.value,
+                        "diy": diagnosis.diy_appropriate,
+                        "confidence": diagnosis.confidence,
+                    },
+                )
+                return diagnosis
+            except Exception as e:
+                last_err = e
+                logger.error("Gemini diagnosis attempt %s failed: %s", attempt + 1, e)
+                await log_event(
+                    phone=phone,
+                    role="system",
+                    type="gemini_call",
+                    payload={
+                        "mode": "diagnosis",
+                        "model": GEMINI_MODEL,
+                        "attempt": attempt + 1,
+                        "error": str(e),
+                    },
+                )
 
-        Returns:
-            dict with 'homeowner_brief', 'pro_brief', 'severity', 'full_response'
-        """
-        try:
-            logger.info(
-                "Analyzing image with Gemini %s (%d bytes)", GEMINI_MODEL, len(image_bytes)
-            )
-
-            user_context = f"\nUser's description: {user_message}" if user_message else ""
-            prompt_text = (
-                f"{self.system_prompt}{user_context}\n\nAnalyze the image and provide your diagnosis:"
-            )
-
-            contents = [
-                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                prompt_text,
-            ]
-
-            logger.info("Calling Gemini API (timeout=%ds)...", GEMINI_TIMEOUT_SECONDS)
-
-            # Run sync client in thread pool — avoids gRPC async issues on Cloud Run
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self.client.models.generate_content,
-                    model=GEMINI_MODEL,
-                    contents=contents,
-                ),
-                timeout=GEMINI_TIMEOUT_SECONDS,
-            )
-
-            logger.info("Gemini analysis completed successfully")
-
-            full_response = response.text
-            return self._parse_response(full_response)
-
-        except asyncio.TimeoutError:
-            logger.error("Gemini API timed out after %ds", GEMINI_TIMEOUT_SECONDS)
-            raise RuntimeError(
-                f"Gemini API did not respond within {GEMINI_TIMEOUT_SECONDS} seconds"
-            )
-        except Exception as e:
-            logger.error("Error analyzing image with Gemini: %s", e, exc_info=True)
-            raise
+        raise RuntimeError(f"Diagnosis failed after retries: {last_err}")
 
     async def chat_reply(
         self,
         prior_turns: list[dict[str, str]],
         user_message: str,
         memory_facts: list[str] | None = None,
+        service_notes: list[str] | None = None,
+        *,
+        phone: str | None = None,
     ) -> str:
-        """
-        Conversational reply using recent history + current user message (text only).
-        prior_turns: [{"role": "user"|"assistant", "content": "..."}] excluding the current message.
-        """
+        """Multi-turn chat with optional function calling."""
         user_message = (user_message or "").strip()
         if not user_message:
             return "Send me a message or a photo of the issue and I will help."
 
-        lines = [CHAT_SYSTEM]
+        system = f"{BASE_PERSONA}\n{CHAT_INSTRUCTIONS}"
+        if service_notes:
+            system += "\n\nKnown service notes:\n" + "\n".join(
+                f"- {n}" for n in service_notes[:15]
+            )
         if memory_facts:
-            lines.extend(["", "Long-term facts about this customer:"])
-            for fact in memory_facts[:10]:
-                lines.append(f"- {fact}")
-        lines.extend(["", "Conversation so far:"])
-        for t in prior_turns[-20:]:
-            role = t.get("role", "")
-            content = (t.get("content") or "").strip()
-            if not content:
-                continue
-            if len(content) > 500:
-                content = content[:497] + "..."
-            label = "User" if role == "user" else "Assistant"
-            lines.append(f"{label}: {content}")
-        lines.extend(["", f"User: {user_message}", "", "Assistant:"])
-        prompt = "\n".join(lines)
+            system += (
+                "\n\nLong-term facts (possibly stale; prefer recent turns):\n"
+                + "\n".join(f"- {f}" for f in memory_facts[:10])
+            )
 
+        contents: list[types.Content] = []
+        for t in prior_turns[-20:]:
+            role = "user" if t.get("role") == "user" else "model"
+            text = (t.get("content") or "").strip()
+            if not text:
+                continue
+            if len(text) > 500:
+                text = text[:497] + "..."
+            contents.append(
+                types.Content(role=role, parts=[types.Part.from_text(text=text)])
+            )
+        contents.append(
+            types.Content(
+                role="user", parts=[types.Part.from_text(text=user_message)]
+            )
+        )
+
+        # Build tool declarations for google-genai
+        fn_decls = []
+        for d in TOOL_DECLARATIONS:
+            fn_decls.append(
+                types.FunctionDeclaration(
+                    name=d["name"],
+                    description=d["description"],
+                    parameters=d.get("parameters"),
+                )
+            )
+        tools = [types.Tool(function_declarations=fn_decls)]
+
+        t0 = time.monotonic()
         try:
             response = await asyncio.wait_for(
                 asyncio.to_thread(
                     self.client.models.generate_content,
                     model=GEMINI_MODEL,
-                    contents=prompt,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system,
+                        tools=tools,
+                    ),
                 ),
                 timeout=GEMINI_TIMEOUT_SECONDS,
             )
-            text = (response.text or "").strip()
-            if len(text) > 1500:
-                text = text[:1497] + "..."
-            return text or "I am not sure how to answer that—try sending a photo of the issue."
-        except asyncio.TimeoutError:
-            logger.error("Gemini chat timed out after %ds", GEMINI_TIMEOUT_SECONDS)
-            raise
         except Exception as e:
-            logger.error("Gemini chat error: %s", e, exc_info=True)
+            await log_event(
+                phone=phone,
+                role="system",
+                type="gemini_call",
+                payload={"mode": "chat", "error": str(e)},
+            )
             raise
 
-    def _parse_response(self, response_text: str) -> dict:
-        """
-        Parse Gemini response into structured homeowner/pro sections.
+        # Handle function calls (single round-trip loop, max 3)
+        for _ in range(3):
+            fn_calls = []
+            if response.candidates:
+                for part in response.candidates[0].content.parts or []:
+                    fc = getattr(part, "function_call", None)
+                    if fc and getattr(fc, "name", None):
+                        fn_calls.append(fc)
+            if not fn_calls:
+                break
 
-        Returns:
-            dict with 'homeowner_brief', 'pro_brief', 'severity', 'full_response'
-        """
-        try:
-            parts = response_text.split("**PRO BRIEF:**")
+            contents.append(response.candidates[0].content)
+            fn_response_parts = []
+            for fc in fn_calls:
+                args = dict(fc.args) if fc.args else {}
+                result = await execute_tool(
+                    fc.name, args, homeowner_phone=phone or ""
+                )
+                fn_response_parts.append(
+                    types.Part.from_function_response(
+                        name=fc.name, response=result
+                    )
+                )
+            contents.append(types.Content(role="user", parts=fn_response_parts))
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.client.models.generate_content,
+                    model=GEMINI_MODEL,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system,
+                        tools=tools,
+                    ),
+                ),
+                timeout=GEMINI_TIMEOUT_SECONDS,
+            )
 
-            if len(parts) == 2:
-                homeowner_section = parts[0].replace("**HOMEOWNER BRIEF:**", "").strip()
-                pro_section = parts[1].strip()
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        text = (response.text or "").strip()
+        if len(text) > 1500:
+            text = text[:1497] + "..."
+        await log_event(
+            phone=phone,
+            role="system",
+            type="gemini_call",
+            payload={
+                "mode": "chat",
+                "model": GEMINI_MODEL,
+                "latency_ms": latency_ms,
+                "chars": len(text),
+            },
+        )
+        return text or "I am not sure how to answer that — try sending a photo of the issue."
 
-                severity = "Medium"
-                for line in pro_section.split("\n"):
-                    if "severity" in line.lower():
-                        if "high" in line.lower():
-                            severity = "High"
-                        elif "low" in line.lower():
-                            severity = "Low"
-                        break
+    async def extract_pro_details(self, free_text: str) -> dict[str, Any]:
+        """Structured extract of availability + estimate from pro free text."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "availability_text": {"type": "string"},
+                "estimate_text": {"type": "string"},
+                "estimate_low": {"type": "number"},
+                "estimate_high": {"type": "number"},
+            },
+            "required": ["availability_text", "estimate_text"],
+        }
+        prompt = (
+            "Extract the pro's availability and rough estimate from this message. "
+            "If a single number, set low=high. Currency USD.\n\n"
+            f"Message: {free_text}"
+        )
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                self.client.models.generate_content,
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=BASE_PERSONA,
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                ),
+            ),
+            timeout=30,
+        )
+        return json.loads(response.text or "{}")
 
-                return {
-                    "homeowner_brief": homeowner_section,
-                    "pro_brief": pro_section,
-                    "severity": severity,
-                    "full_response": response_text,
-                }
-            else:
-                logger.warning("Could not parse Gemini response into sections")
-                return {
-                    "homeowner_brief": response_text,
-                    "pro_brief": "See full response above",
-                    "severity": "Medium",
-                    "full_response": response_text,
-                }
 
-        except Exception as e:
-            logger.error("Error parsing Gemini response: %s", e)
-            return {
-                "homeowner_brief": response_text,
-                "pro_brief": "Error parsing response",
-                "severity": "Medium",
-                "full_response": response_text,
-            }
-
-
-# Global service instance
 gemini_service = GeminiService()
