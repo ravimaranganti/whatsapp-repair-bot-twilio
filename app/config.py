@@ -96,6 +96,10 @@ class Settings(BaseSettings):
     )
     tpl_job_followup_sid: str = Field(default="", description="job_followup Content SID")
     tpl_job_reopen_sid: str = Field(default="", description="job_reopen Content SID (optional)")
+    tpl_welcome_role_sid: str = Field(
+        default="",
+        description="In-session welcome quick reply (role:homeowner / role:pro). No WhatsApp approval.",
+    )
 
     # Phase 5
     operator_phone: str = Field(

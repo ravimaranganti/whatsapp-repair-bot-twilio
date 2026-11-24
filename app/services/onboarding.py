@@ -40,6 +40,24 @@ def join_code_ok(body: str) -> bool:
     return len(parts) >= 2 and parts[1] == expected
 
 
+async def start_pro_onboarding(phone: str) -> None:
+    """Begin the existing 6-step pro profile flow."""
+    phone_n = normalize_phone(phone)
+    await conversation_state_store.set(
+        phone_n, MODE_PRO_ONBOARDING, {"step": 1, "draft": {}}
+    )
+    await pro_store.upsert(phone_n)
+    await whatsapp_service.send_text_message(
+        phone_n,
+        "Welcome! Let's set up your pro profile.\n\n"
+        "*Step 1/6:* What's your name and business name?\n"
+        "(e.g. Mike / Mike's Plumbing)",
+    )
+    await log_event(
+        phone=phone_n, role="pro", type="pro_onboarding_started", payload={}
+    )
+
+
 async def handle_pro_command(phone: str, body: str) -> bool:
     """
     Handle STOP/PAUSE/RESUME/PROFILE/JOIN.
@@ -96,19 +114,7 @@ async def handle_pro_command(phone: str, body: str) -> bool:
         return True
 
     if join_code_ok(text):
-        await conversation_state_store.set(
-            phone_n, MODE_PRO_ONBOARDING, {"step": 1, "draft": {}}
-        )
-        await pro_store.upsert(phone_n)  # ensure doc exists
-        await whatsapp_service.send_text_message(
-            phone_n,
-            "Welcome! Let's set up your pro profile.\n\n"
-            "*Step 1/6:* What's your name and business name?\n"
-            "(e.g. Mike / Mike's Plumbing)",
-        )
-        await log_event(
-            phone=phone_n, role="pro", type="pro_onboarding_started", payload={}
-        )
+        await start_pro_onboarding(phone_n)
         return True
 
     return False

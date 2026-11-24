@@ -68,6 +68,12 @@ async def process_message(message: MessageContent, sender: str):
             await whatsapp_service.send_text_message(phone, PILOT_DENY_MSG)
             return
 
+        from app.services.welcome import handle_welcome
+
+        welcome_state = await conversation_state_store.get(phone)
+        if await handle_welcome(message, phone, welcome_state):
+            return
+
         # Feedback keyword
         from app.services.feedback import (
             capture_pending_feedback,
@@ -158,19 +164,6 @@ async def handle_text_message(message: MessageContent, sender: str):
     raw = (message.body or "").strip()
     text_body = raw.lower()
     logger.info("Text message from %s: %s", sender, text_body[:80])
-
-    if text_body in {"help", "start", "hello", "hi"}:
-        welcome_message = (
-            "Welcome to *Houston Home Repair AI*!\n\n"
-            "Send a clear photo of a plumbing, HVAC, electrical, appliance, "
-            "or handyman issue. I'll diagnose it and — when you're ready — "
-            "ask local opted-in pros for availability and estimates.\n\n"
-            "Pros: reply *JOIN* to opt in for job alerts."
-        )
-        await conversation_store.append_turn(sender, "user", raw or text_body)
-        await conversation_store.append_turn(sender, "assistant", welcome_message)
-        await whatsapp_service.send_text_message(sender, welcome_message)
-        return
 
     # retry keyword after expired job
     if text_body == "retry" and settings.dispatch_enabled:
