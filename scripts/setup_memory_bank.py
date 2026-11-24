@@ -20,7 +20,7 @@ import sys
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Provision Memory Bank (Reasoning Engine)")
-    parser.add_argument("--project", default="fastapi-test-493805")
+    parser.add_argument("--project", default="agentic-corporate")
     parser.add_argument("--region", default="us-central1")
     parser.add_argument("--display-name", default="whatsapp-repair-memory-bank")
     parser.add_argument("--list-only", action="store_true")
@@ -61,9 +61,10 @@ def main() -> int:
         f"projects/{args.project}/locations/{args.region}"
         "/publishers/google/models/text-embedding-005"
     )
+    # Memory Bank generation currently requires gemini-3.5-flash (not 2.5)
     gen_model = (
         f"projects/{args.project}/locations/{args.region}"
-        "/publishers/google/models/gemini-2.5-flash"
+        "/publishers/google/models/gemini-3.5-flash"
     )
     memory_config = types.ReasoningEngineContextSpecMemoryBankConfig(
         similarity_search_config=types.ReasoningEngineContextSpecMemoryBankConfigSimilaritySearchConfig(
