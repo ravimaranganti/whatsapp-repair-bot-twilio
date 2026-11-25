@@ -152,7 +152,16 @@ async def handle_followup_rating(phone: str, body: str, payload: str) -> bool:
     the follow-up was sent.
     """
     pl = (payload or "").strip()
-    rating = _RATING_BY_PAYLOAD.get(pl)
+    from app.services.homeowner_actions import parse_homeowner_payload
+
+    tap = parse_homeowner_payload(pl)
+    rating = None
+    tapped_job = ""
+    if tap and tap.action in _RATING_BY_PAYLOAD:
+        rating = _RATING_BY_PAYLOAD[tap.action]
+        tapped_job = tap.job_id
+    if rating is None:
+        rating = _RATING_BY_PAYLOAD.get(pl)
     state = await conversation_state_store.get(phone)
     ctx = dict(state.get("context") or {})
     if rating is None and state.get("mode") == MODE_AWAITING_FEEDBACK:
@@ -160,7 +169,7 @@ async def handle_followup_rating(phone: str, body: str, payload: str) -> bool:
     if rating is None:
         return False
 
-    job_id = ctx.get("job_id")
+    job_id = tapped_job or ctx.get("active_job_id") or ctx.get("job_id")
     role = ctx.get("role") or "homeowner"
     await store_feedback(
         phone=phone,

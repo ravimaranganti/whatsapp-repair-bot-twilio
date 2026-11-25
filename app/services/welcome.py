@@ -76,6 +76,7 @@ HOMEOWNER_JOB_MODES = frozenset(
         "awaiting_pick",
         "awaiting_show_options",
         "awaiting_share_notes",
+        "awaiting_quote_question",
         "awaiting_new_issue_confirm",
     }
 )
@@ -252,6 +253,8 @@ def waiting_reminder(mode: str, context: dict | None) -> str:
         return "Reply *Yes* to find pros, or *No thanks*."
     if mode == "awaiting_share_notes":
         return "Reply *Yes* or *No* about sharing your access notes."
+    if mode == "awaiting_quote_question":
+        return "Send the question you want me to pass to that pro."
     if mode == "awaiting_new_issue_confirm":
         return "Reply *Yes* if this is a new issue, or *No* to keep the current one."
     if mode == "awaiting_feedback":

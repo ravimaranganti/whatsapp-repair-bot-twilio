@@ -248,7 +248,7 @@ async def tasks_job_followup(request: Request):
                     "Reply Great, Okay, or Not good."
                 ),
                 template_sid=settings.tpl_job_followup_sid,
-                content_variables={"1": trade, "2": when},
+                content_variables={"1": trade, "2": when, "3": clean_template_value(job_id, "job", limit=32)},
             )
         except Exception as e:
             logger.warning("follow-up send failed for %s: %s", role, e)
@@ -256,7 +256,7 @@ async def tasks_job_followup(request: Request):
         await conversation_state_store.set(
             role_phone,
             MODE_AWAITING_FEEDBACK,
-            {"job_id": job_id, "role": role},
+            {"job_id": job_id, "active_job_id": job_id, "role": role},
         )
     await job_store.update_fields(job_id, followup_sent=True)
     return {"ok": True}

@@ -131,6 +131,25 @@ class JobStore:
         await asyncio.to_thread(_write)
         return doc
 
+    async def list_for_homeowner(
+        self, phone: str, states: set[str] | None = None
+    ) -> list[dict[str, Any]]:
+        phone_n = normalize_phone(phone)
+
+        def _read() -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for snap in self._db().collection(self._collection).stream():
+                data = snap.to_dict() or {}
+                if normalize_phone(str(data.get("homeowner_phone") or "")) != phone_n:
+                    continue
+                if states and data.get("state") not in states:
+                    continue
+                data["job_id"] = snap.id
+                out.append(data)
+            return out
+
+        return await asyncio.to_thread(_read)
+
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
         def _read() -> dict[str, Any] | None:
             snap = self._db().collection(self._collection).document(job_id).get()

@@ -128,6 +128,22 @@ class Settings(BaseSettings):
         default="",
         description="In-session service-call fee buttons. No WhatsApp approval.",
     )
+    tpl_quote_choice_sid: str = Field(
+        default="",
+        description="Per-quote Book / Pass / Ask buttons. Utility, includes job and quote ids.",
+    )
+    tpl_dispatch_consent_sid: str = Field(
+        default="",
+        description="Homeowner yes/no to contact pros. Button id includes the job id.",
+    )
+    tpl_share_notes_sid: str = Field(
+        default="",
+        description="Share access notes yes/no. Button id includes job and quote ids.",
+    )
+    tpl_new_issue_sid: str = Field(
+        default="",
+        description="New issue vs keep current request. Button id includes the open job id.",
+    )
 
     # Phase 5
     operator_phone: str = Field(

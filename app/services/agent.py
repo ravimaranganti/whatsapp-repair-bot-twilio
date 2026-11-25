@@ -126,11 +126,25 @@ async def process_message(message: MessageContent, sender: str):
             handle_pro_details,
         )
 
+        payload = message.button_payload or message.list_id or ""
+        from app.services.alert_reply import resolve_alert_reply
+
+        named_job = resolve_alert_reply(payload, "", []).job_id
+        if named_job and await handle_pro_alert_response(
+            phone, message.body or "", payload
+        ):
+            await log_event(
+                phone=phone,
+                role="pro",
+                type="button_tap",
+                payload={"payload": payload, "body": message.body},
+            )
+            return
+
         if mode == MODE_PRO_AWAITING_DETAILS:
             if await handle_pro_details(phone, message.body or "", state):
                 return
 
-        payload = message.button_payload or ""
         if await handle_pro_alert_response(phone, message.body or "", payload):
             await log_event(
                 phone=phone,
@@ -140,19 +154,35 @@ async def process_message(message: MessageContent, sender: str):
             )
             return
 
-        # Homeowner stateful flows
-        if mode in {
-            MODE_AWAITING_DISPATCH_CONSENT,
-            MODE_AWAITING_PICK,
-            MODE_AWAITING_SHOW_OPTIONS,
-            "awaiting_area",
-            "awaiting_share_notes",
-            "awaiting_new_issue_confirm",
-        } or (message.button_payload or "") == "show_options":
+        # Homeowner stateful flows. A button that names a job is handled
+        # even when the session is sitting on a different request.
+        from app.services.homeowner_actions import parse_homeowner_payload
+
+        homeowner_payload = message.button_payload or message.list_id or ""
+        if (
+            parse_homeowner_payload(homeowner_payload)
+            or mode
+            in {
+                MODE_AWAITING_DISPATCH_CONSENT,
+                MODE_AWAITING_PICK,
+                MODE_AWAITING_SHOW_OPTIONS,
+                "awaiting_area",
+                "awaiting_share_notes",
+                "awaiting_quote_question",
+                "awaiting_new_issue_confirm",
+            }
+            or homeowner_payload == "show_options"
+            or homeowner_payload.startswith("show_options:")
+        ):
             if await handle_homeowner_state(
-                phone, message.body or "", payload, state
+                phone, message.body or "", homeowner_payload or payload, state
             ):
                 return
+
+        from app.services.dispatch import handle_homeowner_typed
+
+        if await handle_homeowner_typed(phone, message.body or ""):
+            return
 
         if message.type == "text":
             await handle_text_message(message, phone)

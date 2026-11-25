@@ -13,6 +13,7 @@ from app.models import (
     MODE_AWAITING_AREA,
     MODE_AWAITING_DISPATCH_CONSENT,
     MODE_AWAITING_PICK,
+    MODE_AWAITING_QUOTE_QUESTION,
     MODE_AWAITING_SHARE_NOTES,
     MODE_AWAITING_SHOW_OPTIONS,
     MODE_IDLE,
@@ -22,8 +23,14 @@ from app.models import (
 from app.models.diagnosis import TRADE_TO_PRO_CATEGORY
 from app.services.conversation_state import conversation_state_store
 from app.services.events import log_event
+from app.services.homeowner_actions import (
+    parse_homeowner_payload,
+    quote_choice_message,
+    typed_choice,
+)
 from app.services.homeowners import homeowner_store
 from app.services.jobs import job_store, resolve_pro_from_pick_payload
+from app.services.alert_reply import job_ref, resolve_alert_reply
 from app.services.matching import select_pros_for_job
 from app.services.pro_capacity import fee_label
 from app.services.pros import pro_store
@@ -38,6 +45,65 @@ from app.services.whatsapp import twilio_error_code, whatsapp_service
 from app.utils.phones import normalize_phone, phone_hash, to_e164
 
 logger = logging.getLogger(__name__)
+
+
+async def _send_choice(
+    phone: str, sid: str, variables: dict[str, str], fallback: str
+) -> None:
+    content_sid = (sid or "").strip()
+    if content_sid:
+        try:
+            await whatsapp_service.send_content_template(
+                phone, content_sid=content_sid, content_variables=variables
+            )
+            return
+        except Exception as e:
+            logger.warning("homeowner choice template failed: %s", e)
+    await whatsapp_service.send_text_message(phone, fallback)
+
+
+def _owns(job: dict[str, Any] | None, phone: str) -> bool:
+    return bool(job) and normalize_phone(str(job.get("homeowner_phone") or "")) == normalize_phone(
+        phone
+    )
+
+
+async def _quote_phone(job_id: str, quote_id: str) -> str | None:
+    responses = await job_store.list_responses(job_id)
+    for response in responses:
+        phone = normalize_phone(str(response.get("pro_phone") or ""))
+        if phone and (phone_hash(phone) == quote_id or phone == normalize_phone(quote_id)):
+            return phone
+    return None
+
+
+async def _open_quotes(phone: str) -> list[dict[str, str]]:
+    jobs = await job_store.list_for_homeowner(phone, {"awaiting_pick"})
+    found: list[dict[str, str]] = []
+    for job in jobs:
+        for response in await job_store.list_responses(job["job_id"]):
+            if response.get("status") != "details_given":
+                continue
+            pro_phone = normalize_phone(str(response.get("pro_phone") or ""))
+            pro = await pro_store.get(pro_phone)
+            found.append(
+                {
+                    "job_id": job["job_id"],
+                    "pro_phone": pro_phone,
+                    "quote_id": phone_hash(pro_phone),
+                    "name": (pro or {}).get("business_name")
+                    or (pro or {}).get("name")
+                    or "Pro",
+                }
+            )
+    return found
+
+
+async def _already_updated(phone: str, job_id: str) -> None:
+    await whatsapp_service.send_text_message(
+        phone,
+        f"This quote or job ({job_ref(job_id)}) has already been updated.",
+    )
 
 
 async def after_diagnosis(
@@ -101,10 +167,15 @@ async def _start_consent_flow(
                     "active_job_id": active,
                 },
             )
-            await whatsapp_service.send_text_message(
+            await _send_choice(
                 phone,
-                "You already have an open request. Is this a *new* issue?\n"
-                "Reply *Yes* to start a new one, or *No* to keep the current request.",
+                settings.tpl_new_issue_sid,
+                {"1": active},
+                (
+                    f"You already have an open request ({job_ref(active)}). "
+                    "Is this a *new* issue?\n"
+                    "Reply *Yes* to start a new one, or *No* to keep the current request."
+                ),
             )
             return
 
@@ -127,6 +198,16 @@ async def _ask_dispatch_consent(
     phone: str, diagnosis: Diagnosis, photo_url: str | None, area_zip: str
 ) -> None:
     trade = diagnosis.trade.value
+    job = await job_store.create_job(
+        homeowner_phone=phone,
+        diagnosis=diagnosis,
+        area_zip=area_zip,
+        photo_url=photo_url,
+        state="diagnosed",
+    )
+    job_id = job["job_id"]
+    await job_store.set_state(job_id, "awaiting_consent")
+    await homeowner_store.update(phone, active_job_id=job_id)
     await conversation_state_store.set(
         phone,
         MODE_AWAITING_DISPATCH_CONSENT,
@@ -134,14 +215,239 @@ async def _ask_dispatch_consent(
             "diagnosis": diagnosis.model_dump(mode="json"),
             "photo_url": photo_url,
             "area_zip": area_zip,
+            "job_id": job_id,
+            "active_job_id": job_id,
         },
     )
-    await whatsapp_service.send_text_message(
+    await _send_choice(
         phone,
-        f"Want me to ask 3–5 local *{trade}* pros for availability and a rough estimate? "
-        "Your number stays private until you choose one.\n\n"
-        "Reply *Yes, find pros* or *No thanks*.",
+        settings.tpl_dispatch_consent_sid,
+        {"1": job_id},
+        (
+            f"Want me to ask 3–5 local *{trade}* pros for availability and a rough estimate? "
+            "Your number stays private until you choose one.\n\n"
+            f"Reply *Yes, find pros* or *No thanks* for {job_ref(job_id)}."
+        ),
     )
+
+
+async def _apply_homeowner_tap(
+    phone: str, tap: Any, ctx: dict[str, Any]
+) -> bool:
+    """Run a button that already names its job. True when the tap was ours."""
+    job = await job_store.get_job(tap.job_id) if tap.job_id else None
+    if tap.action in {"rating_great", "rating_okay", "rating_not_good"}:
+        return False
+    if not _owns(job, phone):
+        await _already_updated(phone, tap.job_id)
+        return True
+
+    if tap.action == "confirm_job":
+        if job.get("state") != "awaiting_consent":
+            await _already_updated(phone, tap.job_id)
+            return True
+        diagnosis = Diagnosis.model_validate(job.get("diagnosis") or ctx.get("diagnosis"))
+        await dispatch_job(
+            phone,
+            {
+                "diagnosis": diagnosis.model_dump(mode="json"),
+                "photo_url": job.get("photo_url"),
+                "area_zip": job.get("area_zip"),
+                "job_id": tap.job_id,
+                "active_job_id": tap.job_id,
+            },
+        )
+        return True
+
+    if tap.action == "cancel_job":
+        if job.get("state") != "awaiting_consent":
+            await _already_updated(phone, tap.job_id)
+            return True
+        await job_store.set_state(tap.job_id, "cancelled")
+        ho = await homeowner_store.get(phone)
+        if (ho or {}).get("active_job_id") == tap.job_id:
+            await homeowner_store.update(phone, active_job_id=None)
+        await conversation_state_store.clear(phone)
+        await whatsapp_service.send_text_message(
+            phone, "No problem. Send another photo anytime if you change your mind."
+        )
+        return True
+
+    if tap.action == "show_options":
+        if job.get("state") not in {"dispatched", "awaiting_pick"}:
+            await _already_updated(phone, tap.job_id)
+            return True
+        await maybe_send_homeowner_options(tap.job_id, force=True)
+        return True
+
+    if tap.action in {"book_quote", "decline_quote", "ask_quote"}:
+        pro_phone = await _quote_phone(tap.job_id, tap.quote_id)
+        responses = await job_store.list_responses(tap.job_id)
+        mine = next(
+            (
+                response
+                for response in responses
+                if normalize_phone(str(response.get("pro_phone") or "")) == pro_phone
+            ),
+            None,
+        )
+        active = (
+            job.get("state") == "awaiting_pick"
+            and mine
+            and mine.get("status") == "details_given"
+        )
+        if not pro_phone or not active:
+            await _already_updated(phone, tap.job_id)
+            return True
+        if tap.action == "decline_quote":
+            await job_store.upsert_response(tap.job_id, pro_phone, status="homeowner_passed")
+            pro = await pro_store.get(pro_phone)
+            name = (pro or {}).get("business_name") or (pro or {}).get("name") or "that pro"
+            await whatsapp_service.send_text_message(
+                phone, f"Passed on *{name}* for {job_ref(tap.job_id)}."
+            )
+            return True
+        if tap.action == "ask_quote":
+            pro = await pro_store.get(pro_phone)
+            name = (pro or {}).get("business_name") or (pro or {}).get("name") or "that pro"
+            await conversation_state_store.set(
+                phone,
+                MODE_AWAITING_QUOTE_QUESTION,
+                {
+                    "job_id": tap.job_id,
+                    "active_job_id": tap.job_id,
+                    "pro_phone": pro_phone,
+                    "active_quote_id": tap.quote_id,
+                },
+            )
+            await whatsapp_service.send_text_message(
+                phone, f"What do you want to ask *{name}* about {job_ref(tap.job_id)}?"
+            )
+            return True
+        await _choose_pro(phone, job, pro_phone)
+        return True
+
+    if tap.action in {"share_yes", "share_no"}:
+        pro_phone = normalize_phone(
+            str((await _quote_phone(tap.job_id, tap.quote_id)) or ctx.get("pro_phone") or "")
+        )
+        selected = normalize_phone(str(job.get("selected_pro_phone") or ""))
+        responses = await job_store.list_responses(tap.job_id)
+        already = any(
+            normalize_phone(str(response.get("pro_phone") or "")) == pro_phone
+            and response.get("status") == "selected"
+            for response in responses
+        )
+        if (
+            job.get("state") != "assigned"
+            or not pro_phone
+            or selected != pro_phone
+            or already
+        ):
+            await _already_updated(phone, tap.job_id)
+            return True
+        await _finalize_assignment(
+            phone, tap.job_id, pro_phone, share_notes=tap.action == "share_yes"
+        )
+        return True
+
+    if tap.action == "new_issue_no":
+        await conversation_state_store.clear(phone)
+        await whatsapp_service.send_text_message(
+            phone, "Keeping your current request. I'll update you as pros reply."
+        )
+        return True
+
+    if tap.action == "new_issue_yes":
+        if str(ctx.get("active_job_id") or "") != tap.job_id or "diagnosis" not in ctx:
+            await _already_updated(phone, tap.job_id)
+            return True
+        await homeowner_store.update(phone, active_job_id=None)
+        diagnosis = Diagnosis.model_validate(ctx["diagnosis"])
+        await _start_consent_flow(phone, diagnosis, ctx.get("photo_url"))
+        return True
+
+    return False
+
+
+async def _relay_quote_question(phone: str, text: str, ctx: dict[str, Any]) -> None:
+    job_id = str(ctx.get("active_job_id") or ctx.get("job_id") or "")
+    pro_phone = normalize_phone(str(ctx.get("pro_phone") or ""))
+    if not text:
+        await whatsapp_service.send_text_message(phone, "Send the question as a text.")
+        return
+    if not job_id or not pro_phone:
+        await conversation_state_store.clear(phone)
+        await _already_updated(phone, job_id)
+        return
+    try:
+        await whatsapp_service.send_text_message(
+            pro_phone,
+            f"Question from the homeowner about {job_ref(job_id)}:\n{text[:500]}",
+        )
+    except Exception as e:
+        logger.warning("quote question relay failed: %s", e)
+    await conversation_state_store.clear(phone)
+    await whatsapp_service.send_text_message(
+        phone, f"Sent. I passed that to the pro for {job_ref(job_id)}."
+    )
+
+
+async def handle_homeowner_typed(phone: str, body: str) -> bool:
+    """Book / Yes / Pass with no locked button. Do not guess among several quotes."""
+    choice = typed_choice(body)
+    if choice not in {"book", "yes", "pass"}:
+        return False
+    phone_n = normalize_phone(phone)
+    quotes = await _open_quotes(phone_n)
+    if choice == "pass":
+        if not quotes:
+            return False
+        if len(quotes) > 1:
+            await whatsapp_service.send_text_message(phone_n, quote_choice_message(quotes))
+            return True
+        quote = quotes[0]
+        await job_store.upsert_response(
+            quote["job_id"], quote["pro_phone"], status="homeowner_passed"
+        )
+        await whatsapp_service.send_text_message(
+            phone_n, f"Passed on *{quote['name']}* for {job_ref(quote['job_id'])}."
+        )
+        return True
+    if quotes:
+        if len(quotes) > 1:
+            await whatsapp_service.send_text_message(phone_n, quote_choice_message(quotes))
+            return True
+        job = await job_store.get_job(quotes[0]["job_id"])
+        if job:
+            await _choose_pro(phone_n, job, quotes[0]["pro_phone"])
+        return True
+    if choice != "yes":
+        return False
+    pending = await job_store.list_for_homeowner(phone_n, {"awaiting_consent"})
+    if not pending:
+        return False
+    if len(pending) > 1:
+        refs = ", ".join(job_ref(job["job_id"]) for job in pending[:5])
+        await whatsapp_service.send_text_message(
+            phone_n,
+            f"You have {len(pending)} requests waiting ({refs}). "
+            "Tap Yes, find pros on the message for the one you want.",
+        )
+        return True
+    job = pending[0]
+    diagnosis = Diagnosis.model_validate(job.get("diagnosis") or {})
+    await dispatch_job(
+        phone_n,
+        {
+            "diagnosis": diagnosis.model_dump(mode="json"),
+            "photo_url": job.get("photo_url"),
+            "area_zip": job.get("area_zip"),
+            "job_id": job["job_id"],
+            "active_job_id": job["job_id"],
+        },
+    )
+    return True
 
 
 async def handle_homeowner_state(
@@ -154,6 +460,13 @@ async def handle_homeowner_state(
     text = (body or "").strip()
     low = text.lower()
     payload = (interaction_payload or "").strip()
+    tap = parse_homeowner_payload(payload)
+    if tap and await _apply_homeowner_tap(phone_n, tap, ctx):
+        return True
+
+    if mode == MODE_AWAITING_QUOTE_QUESTION:
+        await _relay_quote_question(phone_n, text, ctx)
+        return True
 
     if mode == MODE_AWAITING_AREA:
         zips = re.findall(r"\b\d{5}\b", text)
@@ -236,8 +549,8 @@ async def handle_homeowner_state(
         )
         return True
 
-    if payload == "show_options" or mode == MODE_AWAITING_SHOW_OPTIONS:
-        if payload == "show_options" or low in {"show options", "options"}:
+    if payload == "show_options" or payload.startswith("show_options:") or mode == MODE_AWAITING_SHOW_OPTIONS:
+        if payload == "show_options" or payload.startswith("show_options:") or low in {"show options", "options"}:
             job_id = ctx.get("job_id")
             if job_id:
                 await maybe_send_homeowner_options(job_id, force=True)
@@ -277,15 +590,23 @@ async def dispatch_job(phone: str, ctx: dict[str, Any]) -> None:
     area_zip = ctx.get("area_zip") or ho.get("area_zip") or ""
     trade = TRADE_TO_PRO_CATEGORY.get(diag.trade, diag.trade.value)
 
-    job = await job_store.create_job(
-        homeowner_phone=phone_n,
-        diagnosis=diag,
-        area_zip=area_zip,
-        photo_url=ctx.get("photo_url"),
-        state="diagnosed",
-    )
-    job_id = job["job_id"]
-    await job_store.set_state(job_id, "awaiting_consent")
+    job_id = str(ctx.get("job_id") or ctx.get("active_job_id") or "")
+    job = await job_store.get_job(job_id) if job_id else None
+    if not job:
+        job = await job_store.create_job(
+            homeowner_phone=phone_n,
+            diagnosis=diag,
+            area_zip=area_zip,
+            photo_url=ctx.get("photo_url"),
+            state="diagnosed",
+        )
+        job_id = job["job_id"]
+        await job_store.set_state(job_id, "awaiting_consent")
+    elif job.get("state") == "diagnosed":
+        await job_store.set_state(job_id, "awaiting_consent")
+    elif job.get("state") != "awaiting_consent":
+        await _already_updated(phone_n, job_id)
+        return
     await homeowner_store.update(phone_n, active_job_id=job_id)
 
     pros = await select_pros_for_job(
@@ -371,23 +692,31 @@ async def _send_job_alert(
     zip_v = clean_template_value(area_zip, "your area", limit=32)
     issue_v = clean_template_value(issue, "home repair", limit=200)
     severity_v = clean_template_value(severity, "medium", limit=32)
+    ref = clean_template_value(job_id, "this job", limit=32)
+    body = (
+        f"New *{trade_v}* request near {zip_v}: {issue_v}\n"
+        f"Severity: {severity_v}\n\n"
+        f"Tap a button on this message, or reply *Interested {job_ref(ref)}* "
+        f"or *Not available {job_ref(ref)}*."
+    )
+    variables = {
+        "1": trade_v,
+        "2": zip_v,
+        "3": issue_v,
+        "4": severity_v,
+        "5": ref,
+    }
+    sid = (settings.tpl_job_alert_sid or "").strip()
     try:
-        await whatsapp_service.send_business_message(
-            to,
-            body=(
-                f"New *{trade_v}* request near {zip_v}: {issue_v}\n"
-                f"Severity: {severity_v}\n\n"
-                f"Reply *Interested* or *Not available* "
-                f"(ref {job_id})."
-            ),
-            template_sid=settings.tpl_job_alert_sid,
-            content_variables={
-                "1": trade_v,
-                "2": zip_v,
-                "3": issue_v,
-                "4": severity_v,
-            },
-        )
+        if sid:
+            try:
+                await whatsapp_service.send_content_template(
+                    to, content_sid=sid, content_variables=variables
+                )
+                return True
+            except Exception as e:
+                logger.warning("job alert template failed, trying text: %s", e)
+        await whatsapp_service.send_text_message(to, body)
         return True
     except Exception as e:
         logger.warning("job alert send failed: %s", e)
@@ -401,49 +730,42 @@ async def _send_job_alert(
         return False
 
 
-async def handle_pro_alert_response(phone: str, body: str, payload: str) -> bool:
-    """Interested / Not available from pro. Returns True if handled."""
+def _pro_already_answered(responses: list[dict[str, Any]], phone: str) -> bool:
     phone_n = normalize_phone(phone)
-    low = (body or "").lower()
-    pl = (payload or "").strip()
+    for response in responses:
+        if normalize_phone(str(response.get("pro_phone") or "")) != phone_n:
+            continue
+        status = str(response.get("status") or "")
+        return status not in {"", "alerted"}
+    return False
 
-    job_id = None
-    status = None
-    if pl.startswith("int:"):
-        job_id, status = pl[4:], "interested"
-    elif pl.startswith("dec:"):
-        job_id, status = pl[4:], "declined"
-    elif pl in {"interested", "yes"}:
-        status = "interested"
-    elif pl in {"not_available", "declined", "no"}:
-        status = "declined"
-    elif "not available" in low or low in {"no", "decline", "declined"}:
-        status = "declined"
-    elif "interested" in low or low in {"yes", "y"}:
-        status = "interested"
 
-    if not status:
+async def handle_pro_alert_response(phone: str, body: str, payload: str) -> bool:
+    """Interested / Not available for one specific job. Returns True if handled."""
+    phone_n = normalize_phone(phone)
+    open_ids = await pro_store.pending_alert_ids(phone_n)
+    decision = resolve_alert_reply(payload, body, open_ids)
+    if not decision.handled:
         return False
-
-    if not job_id:
-        job_id = await pro_store.pop_pending_alert(phone_n)
-    if not job_id:
-        # try parse ref from body
-        m = re.search(r"\b([a-f0-9]{12,16})\b", body or "")
-        if m:
-            job_id = m.group(1)
-
-    if not job_id:
-        return False
-
-    job = await job_store.get_job(job_id)
-    if not job or job.get("state") not in {"dispatched", "awaiting_pick"}:
-        await whatsapp_service.send_text_message(
-            phone_n, "That job is no longer open. Thanks anyway!"
-        )
+    if decision.clarify:
+        await whatsapp_service.send_text_message(phone_n, decision.clarify)
         return True
 
-    if status == "declined":
+    job_id = decision.job_id or ""
+    ref = job_ref(job_id)
+    job = await job_store.get_job(job_id) if job_id else None
+    responses = await job_store.list_responses(job_id) if job else []
+    open_state = bool(job) and job.get("state") in {"dispatched", "awaiting_pick"}
+    if not open_state or _pro_already_answered(responses, phone_n):
+        await whatsapp_service.send_text_message(
+            phone_n,
+            f"This job ({ref}) has already been updated or filled.",
+        )
+        await pro_store.remove_pending_alert(phone_n, job_id)
+        return True
+
+    await pro_store.remove_pending_alert(phone_n, job_id)
+    if decision.status == "declined":
         await job_store.upsert_response(job_id, phone_n, status="declined")
         await whatsapp_service.send_text_message(
             phone_n, "Thanks for letting us know."
@@ -455,7 +777,9 @@ async def handle_pro_alert_response(phone: str, body: str, payload: str) -> bool
 
     await job_store.upsert_response(job_id, phone_n, status="interested")
     await conversation_state_store.set(
-        phone_n, MODE_PRO_AWAITING_DETAILS, {"job_id": job_id}
+        phone_n,
+        MODE_PRO_AWAITING_DETAILS,
+        {"job_id": job_id, "active_job_id": job_id},
     )
     await whatsapp_service.send_text_message(
         phone_n,
@@ -471,7 +795,8 @@ async def handle_pro_details(phone: str, body: str, state: dict[str, Any]) -> bo
     if state.get("mode") != MODE_PRO_AWAITING_DETAILS:
         return False
     phone_n = normalize_phone(phone)
-    job_id = (state.get("context") or {}).get("job_id")
+    ctx = state.get("context") or {}
+    job_id = ctx.get("active_job_id") or ctx.get("job_id")
     if not job_id:
         await conversation_state_store.clear(phone_n)
         return True
@@ -550,14 +875,19 @@ async def maybe_send_homeowner_options(job_id: str, force: bool = False) -> None
         )
         option_phones.append(normalize_phone(r["pro_phone"]))
 
-    lines.append("Reply with *1*, *2*, or *3* (or the name) to choose.")
+    lines.append("Tap *Book This Pro* on the quote you want.")
     homeowner = job["homeowner_phone"]
     body = "\n".join(lines)
-    context = {"job_id": job_id, "option_phones": option_phones}
+    context = {
+        "job_id": job_id,
+        "active_job_id": job_id,
+        "option_phones": option_phones,
+    }
     sid = settings.tpl_job_reopen_sid
     variables = {
         "1": clean_template_value(len(option_phones), "1", limit=8),
         "2": clean_template_value(job.get("trade"), "repair", limit=40),
+        "3": clean_template_value(job_id, "job", limit=32),
     }
     last = await get_last_inbound(homeowner)
     use_template = (
@@ -566,7 +896,32 @@ async def maybe_send_homeowner_options(job_id: str, force: bool = False) -> None
     )
     if not use_template:
         try:
-            await whatsapp_service.send_text_message(homeowner, body)
+            await whatsapp_service.send_text_message(
+                homeowner,
+                f"Here are your options for {job_ref(job_id)}. "
+                "Tap a button on the quote you want.",
+            )
+            for response, pro_phone in zip(complete[:5], option_phones):
+                pro = await pro_store.get(pro_phone)
+                name = (pro or {}).get("business_name") or (pro or {}).get("name") or "Pro"
+                quote_hash = phone_hash(pro_phone)
+                await _send_choice(
+                    homeowner,
+                    settings.tpl_quote_choice_sid,
+                    {
+                        "1": clean_template_value(name, "Pro", limit=40),
+                        "2": clean_template_value(response.get("availability_text"), "soon", limit=80),
+                        "3": clean_template_value(response.get("estimate_text"), "see message", limit=80),
+                        "4": job_id,
+                        "5": quote_hash,
+                    },
+                    (
+                        f"*{name}* for {job_ref(job_id)}\n"
+                        f"When: {response.get('availability_text')}\n"
+                        f"Est: {response.get('estimate_text') or '—'}\n"
+                        "Tap Book This Pro, Pass, or Ask Question."
+                    ),
+                )
             await conversation_state_store.set(
                 homeowner, MODE_AWAITING_PICK, context
             )
@@ -633,13 +988,22 @@ async def handle_pick(
         or job.get("alerted_pro_phones")
         or []
     )
+    if not payload:
+        open_jobs = await job_store.list_for_homeowner(phone_n, {"awaiting_pick"})
+        if len(open_jobs) > 1:
+            await whatsapp_service.send_text_message(
+                phone_n, quote_choice_message(await _open_quotes(phone_n))
+            )
+            return
 
     chosen: str | None = None
     if payload.startswith("pick:"):
         chosen = resolve_pro_from_pick_payload(payload, option_phones)
     else:
         low = text.strip().lower()
-        if low.isdigit():
+        if typed_choice(text) == "book" and len(option_phones) == 1:
+            chosen = option_phones[0]
+        elif low.isdigit():
             idx = int(low) - 1
             if 0 <= idx < len(option_phones):
                 chosen = option_phones[idx]
@@ -661,26 +1025,41 @@ async def handle_pick(
         )
         return
 
+    await _choose_pro(phone_n, job, chosen)
+
+
+async def _choose_pro(phone: str, job: dict[str, Any], pro_phone: str) -> None:
+    phone_n = normalize_phone(phone)
+    pro_n = normalize_phone(pro_phone)
+    job_id = job["job_id"]
     notes = await homeowner_store.list_service_notes(phone_n)
+    await job_store.set_state(job_id, "assigned", selected_pro_phone=pro_n)
     if notes:
+        quote_hash = phone_hash(pro_n)
+        pro = await pro_store.get(pro_n)
+        pname = (pro or {}).get("business_name") or (pro or {}).get("name") or "the pro"
         await conversation_state_store.set(
             phone_n,
             MODE_AWAITING_SHARE_NOTES,
-            {"job_id": job_id, "pro_phone": chosen},
+            {
+                "job_id": job_id,
+                "active_job_id": job_id,
+                "pro_phone": pro_n,
+                "active_quote_id": quote_hash,
+            },
         )
-        await job_store.set_state(
-            job_id, "assigned", selected_pro_phone=chosen
-        )
-        pro = await pro_store.get(chosen)
-        pname = (pro or {}).get("business_name") or (pro or {}).get("name") or "the pro"
-        await whatsapp_service.send_text_message(
+        await _send_choice(
             phone_n,
-            f"Share your saved access notes with {pname}?\nReply *Yes* or *No*.",
+            settings.tpl_share_notes_sid,
+            {
+                "1": clean_template_value(pname, "the pro", limit=40),
+                "2": job_id,
+                "3": quote_hash,
+            },
+            f"Share your saved access notes with {pname} for {job_ref(job_id)}?\nReply *Yes* or *No*.",
         )
         return
-
-    await job_store.set_state(job_id, "assigned", selected_pro_phone=chosen)
-    await _finalize_assignment(phone_n, job_id, chosen, share_notes=False)
+    await _finalize_assignment(phone_n, job_id, pro_n, share_notes=False)
 
 
 async def _finalize_assignment(

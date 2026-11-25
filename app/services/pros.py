@@ -123,6 +123,26 @@ class ProStore:
 
         await asyncio.to_thread(_write)
 
+    async def pending_alert_ids(self, phone: str) -> list[str]:
+        pro = await self.get(phone)
+        if not pro:
+            return []
+        return [str(job_id) for job_id in (pro.get("pending_alert_job_ids") or []) if job_id]
+
+    async def remove_pending_alert(self, phone: str, job_id: str) -> None:
+        if not job_id:
+            return
+
+        def _write() -> None:
+            from google.cloud import firestore
+
+            self._ref(phone).set(
+                {"pending_alert_job_ids": firestore.ArrayRemove([job_id])},
+                merge=True,
+            )
+
+        await asyncio.to_thread(_write)
+
     async def pop_pending_alert(self, phone: str) -> str | None:
         pro = await self.get(phone)
         if not pro:
