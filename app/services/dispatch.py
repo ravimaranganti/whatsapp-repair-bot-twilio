@@ -38,6 +38,17 @@ from app.services.jobs import job_store, resolve_pro_from_pick_payload
 from app.services.alert_reply import job_ref, resolve_alert_reply
 from app.services.matching import select_pros_for_job
 from app.services.pro_profile import pro_fit_line
+from app.services.pro_reply import (
+    QUOTE_READY,
+    QUOTE_WITH_QUESTION,
+    QUESTION_ONLY,
+    button_first_name,
+    card_extra,
+    estimate_bounds,
+    experience_sentence,
+    parse_pro_job_reply,
+    quote_card_text,
+)
 from app.services.pros import pro_store
 from app.services.session_window import (
     clean_template_value,
@@ -298,6 +309,28 @@ async def _apply_homeowner_tap(
         )
         return True
 
+    if tap.action == "reply_pro_q":
+        pro_phone = await _quote_phone(tap.job_id, tap.quote_id)
+        responses = await job_store.list_responses(tap.job_id)
+        mine = next(
+            (
+                response
+                for response in responses
+                if normalize_phone(str(response.get("pro_phone") or "")) == pro_phone
+            ),
+            None,
+        )
+        open_reply = (
+            job.get("state") in {"dispatched", "awaiting_pick"}
+            and mine
+            and mine.get("status") in {"interested", "details_given"}
+        )
+        if not pro_phone or not open_reply:
+            await _already_updated(phone, tap.job_id)
+            return True
+        await _ask_homeowner_to_reply(phone, job, pro_phone, mine)
+        return True
+
     if tap.action in {"book_quote", "pass_quote", "ask_quote"}:
         pro_phone = await _quote_phone(tap.job_id, tap.quote_id)
         responses = await job_store.list_responses(tap.job_id)
@@ -321,21 +354,7 @@ async def _apply_homeowner_tap(
             await _after_pass(phone, job, pro_phone)
             return True
         if tap.action == "ask_quote":
-            pro = await pro_store.get(pro_phone)
-            name = (pro or {}).get("business_name") or (pro or {}).get("name") or "that pro"
-            await conversation_state_store.set(
-                phone,
-                MODE_AWAITING_QUOTE_QUESTION,
-                {
-                    "job_id": tap.job_id,
-                    "active_job_id": tap.job_id,
-                    "pro_phone": pro_phone,
-                    "active_quote_id": tap.quote_id,
-                },
-            )
-            await whatsapp_service.send_text_message(
-                phone, f"What do you want to ask *{name}* about {job_ref(tap.job_id)}?"
-            )
+            await _ask_homeowner_to_reply(phone, job, pro_phone, mine)
             return True
         await _choose_pro(phone, job, pro_phone)
         return True
@@ -383,6 +402,47 @@ async def _apply_homeowner_tap(
     return False
 
 
+async def _ask_homeowner_to_reply(
+    phone: str, job: dict[str, Any], pro_phone: str, response: dict[str, Any] | None
+) -> None:
+    """Lock the homeowner's next text to this pro, and offer a reply button."""
+    job_id = str(job.get("job_id") or "")
+    pro = await pro_store.get(pro_phone)
+    name = (pro or {}).get("business_name") or (pro or {}).get("name") or "that pro"
+    question = str((response or {}).get("pro_question") or "")
+    await conversation_state_store.set(
+        phone,
+        MODE_AWAITING_QUOTE_QUESTION,
+        {
+            "job_id": job_id,
+            "active_job_id": job_id,
+            "pro_phone": pro_phone,
+            "active_quote_id": phone_hash(pro_phone),
+        },
+    )
+    if question:
+        prompt = (
+            f"*{name}* asked about {job_ref(job_id)}: {question}\n\n"
+            "Type your reply and I'll send it."
+        )
+    else:
+        prompt = f"What do you want to ask *{name}* about {job_ref(job_id)}?"
+    trade = clean_template_value(job.get("trade"), "repair", limit=32)
+    await _send_choice(
+        phone,
+        settings.tpl_pro_question_sid if question else "",
+        {
+            "1": clean_template_value(name, "Pro", limit=40),
+            "2": trade,
+            "3": job_id,
+            "4": clean_template_value(question, "a question", limit=200),
+            "5": phone_hash(pro_phone),
+            "6": clean_template_value(button_first_name(name), "Pro", limit=10),
+        },
+        prompt,
+    )
+
+
 async def _relay_quote_question(phone: str, text: str, ctx: dict[str, Any]) -> None:
     job_id = str(ctx.get("active_job_id") or ctx.get("job_id") or "")
     pro_phone = normalize_phone(str(ctx.get("pro_phone") or ""))
@@ -396,10 +456,18 @@ async def _relay_quote_question(phone: str, text: str, ctx: dict[str, Any]) -> N
     try:
         await whatsapp_service.send_text_message(
             pro_phone,
-            f"Question from the homeowner about {job_ref(job_id)}:\n{text[:500]}",
+            f"The homeowner replied about {job_ref(job_id)}:\n{text[:500]}\n\n"
+            "Reply here with when you can come and a rough estimate.",
         )
     except Exception as e:
         logger.warning("quote question relay failed: %s", e)
+    pro_state = await conversation_state_store.get(pro_phone)
+    pro_ctx = dict(pro_state.get("context") or {})
+    if pro_state.get("mode") != MODE_PRO_AWAITING_DETAILS or str(
+        pro_ctx.get("active_job_id") or ""
+    ) != job_id:
+        pro_ctx.update({"job_id": job_id, "active_job_id": job_id})
+        await conversation_state_store.set(pro_phone, MODE_PRO_AWAITING_DETAILS, pro_ctx)
     await conversation_state_store.clear(phone)
     await whatsapp_service.send_text_message(
         phone, f"Sent. I passed that to the pro for {job_ref(job_id)}."
@@ -844,7 +912,8 @@ async def handle_pro_alert_response(phone: str, body: str, payload: str) -> bool
     )
     await whatsapp_service.send_text_message(
         phone_n,
-        "Great! When can you come, and what's a rough estimate or visit fee?",
+        "Got it! Reply with when you can come and a rough estimate "
+        "(or type a quick question if you need more info from the homeowner first).",
     )
     await log_event(
         phone=phone_n, role="pro", type="pro_interested", job_id=job_id, payload={}
@@ -862,38 +931,78 @@ async def handle_pro_details(phone: str, body: str, state: dict[str, Any]) -> bo
         await conversation_state_store.clear(phone_n)
         return True
 
-    from app.services.gemini import gemini_service
-
-    try:
-        details = await gemini_service.extract_pro_details(body)
-    except Exception:
-        details = {
-            "availability_text": body[:200],
-            "estimate_text": body[:200],
-            "estimate_low": None,
-            "estimate_high": None,
-        }
-
     from datetime import datetime, timezone
 
+    job = await job_store.get_job(str(job_id))
+    if not job or job.get("state") not in {"dispatched", "awaiting_pick"}:
+        await conversation_state_store.clear(phone_n)
+        await whatsapp_service.send_text_message(
+            phone_n, f"This job ({job_ref(str(job_id))}) has already been updated or filled."
+        )
+        return True
+
+    pro = await pro_store.get(phone_n) or {}
+    draft = {
+        "availability_text": ctx.get("draft_availability") or "",
+        "price_estimate": ctx.get("draft_price") or "",
+        "caveats_or_notes": ctx.get("draft_notes") or "",
+        "question_for_homeowner": ctx.get("draft_question") or "",
+    }
+    reply = await parse_pro_job_reply(body, pro, job, draft)
+    kept = {
+        "job_id": job_id,
+        "active_job_id": job_id,
+        "draft_availability": reply.availability_text,
+        "draft_price": reply.price_estimate,
+        "draft_notes": reply.caveats_or_notes,
+        "draft_question": reply.question_for_homeowner,
+    }
+
+    if reply.intent == QUESTION_ONLY:
+        await job_store.upsert_response(
+            job_id, phone_n, pro_question=reply.question_for_homeowner
+        )
+        await conversation_state_store.set(phone_n, MODE_PRO_AWAITING_DETAILS, kept)
+        homeowner = str(job.get("homeowner_phone") or "")
+        if homeowner:
+            await _ask_homeowner_to_reply(
+                homeowner,
+                job,
+                phone_n,
+                {"pro_question": reply.question_for_homeowner},
+            )
+        await whatsapp_service.send_text_message(
+            phone_n,
+            "Got it. I've passed your question to the homeowner and will "
+            "message you as soon as they reply.",
+        )
+        return True
+
+    if reply.intent not in {QUOTE_READY, QUOTE_WITH_QUESTION}:
+        await conversation_state_store.set(phone_n, MODE_PRO_AWAITING_DETAILS, kept)
+        await whatsapp_service.send_text_message(phone_n, reply.missing_field_prompt)
+        return True
+
+    low, high = estimate_bounds(reply.price_estimate)
     await job_store.upsert_response(
         job_id,
         phone_n,
         status="details_given",
-        availability_text=details.get("availability_text") or body[:200],
-        estimate_text=details.get("estimate_text") or "",
-        estimate_low=details.get("estimate_low"),
-        estimate_high=details.get("estimate_high"),
+        availability_text=reply.availability_text,
+        estimate_text=reply.price_estimate,
+        estimate_low=low,
+        estimate_high=high,
+        caveat_text=reply.caveats_or_notes,
+        pro_question=reply.question_for_homeowner,
         responded_at=datetime.now(timezone.utc).isoformat(),
     )
     await conversation_state_store.clear(phone_n)
     await whatsapp_service.send_text_message(
         phone_n,
-        "Got it — I'll share this with the homeowner:\n"
-        f"Availability: {details.get('availability_text')}\n"
-        f"Estimate: {details.get('estimate_text')}",
+        "Thanks! I've sent your quote to the homeowner and will let you know "
+        "as soon as they respond.",
     )
-    await maybe_send_homeowner_options(job_id)
+    await maybe_send_homeowner_options(str(job_id))
     return True
 
 
@@ -917,28 +1026,62 @@ async def _deliver_quote_cards(job: dict[str, Any], responses: list[dict[str, An
     if not job_id or not homeowner or not responses:
         return
     option_phones: list[str] = []
+    trade = str(job.get("trade") or "repair")
+    card_sid = (settings.tpl_quote_card_sid or "").strip()
     for response in responses:
-        pro_phone, name, estimate = await _quote_label(response)
+        pro_phone = normalize_phone(str(response.get("pro_phone") or ""))
         if not pro_phone:
             continue
+        pro = await pro_store.get(pro_phone)
+        name = (pro or {}).get("business_name") or (pro or {}).get("name") or "Pro"
+        availability = str(response.get("availability_text") or "soon")
+        price = str(response.get("estimate_text") or "see message")
+        notes = str(response.get("caveat_text") or "")
+        question = str(response.get("pro_question") or "")
         quote_hash = phone_hash(pro_phone)
-        await _send_choice(
-            homeowner,
-            settings.tpl_quote_choice_sid,
-            {
-                "1": clean_template_value(name, "Pro", limit=40),
-                "2": clean_template_value(response.get("availability_text"), "soon", limit=80),
-                "3": clean_template_value(estimate, "see message", limit=80),
-                "4": job_id,
-                "5": quote_hash,
-            },
-            (
-                f"*{name}* for {job_ref(job_id)}\n"
-                f"When: {response.get('availability_text')}\n"
-                f"Est: {estimate}\n"
-                "Tap Book This Pro, Pass, or Ask Question."
-            ),
+        body = quote_card_text(
+            name=name,
+            trade=trade,
+            job_id=job_id,
+            availability=availability,
+            price=price,
+            pro=pro,
+            notes=notes,
+            question=question,
         )
+        extra = card_extra(notes, question, pro, name, price) or "Details are above."
+        if card_sid:
+            await _send_choice(
+                homeowner,
+                card_sid,
+                {
+                    "1": job_id,
+                    "2": clean_template_value(trade, "repair", limit=32),
+                    "3": clean_template_value(name, "Pro", limit=40),
+                    "4": clean_template_value(
+                        f"{experience_sentence(pro)} and are available {availability}.",
+                        "They are a verified local pro.",
+                        limit=160,
+                    ),
+                    "5": clean_template_value(price, "see message", limit=60),
+                    "6": clean_template_value(extra, "Details are above.", limit=240),
+                    "7": quote_hash,
+                },
+                body + "\n\nTap Book This Pro, Ask / Reply, or Pass.",
+            )
+        else:
+            await _send_choice(
+                homeowner,
+                settings.tpl_quote_choice_sid,
+                {
+                    "1": clean_template_value(name, "Pro", limit=40),
+                    "2": clean_template_value(availability, "soon", limit=80),
+                    "3": clean_template_value(price, "see message", limit=80),
+                    "4": job_id,
+                    "5": quote_hash,
+                },
+                body + "\n\nTap Book This Pro, Ask / Reply, or Pass.",
+            )
         await job_store.upsert_response(
             job_id,
             pro_phone,
@@ -947,10 +1090,19 @@ async def _deliver_quote_cards(job: dict[str, Any], responses: list[dict[str, An
         option_phones.append(pro_phone)
     if not option_phones:
         return
+    pending = [
+        normalize_phone(str(item.get("pro_phone") or ""))
+        for item in await job_store.list_responses(job_id)
+        if quote_is_pending(item)
+    ]
     await conversation_state_store.set(
         homeowner,
         MODE_AWAITING_PICK,
-        {"job_id": job_id, "active_job_id": job_id, "option_phones": option_phones},
+        {
+            "job_id": job_id,
+            "active_job_id": job_id,
+            "option_phones": pending or option_phones,
+        },
     )
     await log_event(
         phone=homeowner,

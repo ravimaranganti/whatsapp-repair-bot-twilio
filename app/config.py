@@ -164,6 +164,14 @@ class Settings(BaseSettings):
         default="",
         description="Per-quote Book / Pass / Ask buttons. Utility, includes job and quote ids.",
     )
+    tpl_quote_card_sid: str = Field(
+        default="",
+        description="In-session polished quote card. Book / Ask / Reply / Pass, with job and quote ids.",
+    )
+    tpl_pro_question_sid: str = Field(
+        default="",
+        description="In-session homeowner reply button for a pro's pre-quote question.",
+    )
     tpl_dispatch_consent_sid: str = Field(
         default="",
         description="Homeowner yes/no to contact pros. Button id includes the job id.",

@@ -18,6 +18,7 @@ def test_quote_buttons_carry_job_and_quote():
     assert parse_homeowner_payload("keep_looking:job123").action == "keep_looking"
     assert parse_homeowner_payload("close_job:job123").action == "close_job"
     assert parse_homeowner_payload("retry_pros:job123").action == "retry_pros"
+    assert parse_homeowner_payload("reply_pro_q:job123:hash456").action == "reply_pro_q"
     assert ask.action == "ask_quote"
 
 

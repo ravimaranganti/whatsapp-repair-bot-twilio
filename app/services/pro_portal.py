@@ -351,9 +351,8 @@ async def submit_quote(phone: str, job_id: str, availability: str, estimate: str
     try:
         await whatsapp_service.send_text_message(
             phone_n,
-            "Got it — I'll share this with the homeowner:\n"
-            f"Availability: {when}\n"
-            f"Estimate: {price}",
+            "Thanks! I've sent your quote to the homeowner and will let you know "
+            "as soon as they respond.",
         )
     except Exception as e:
         logger.warning("quote confirmation failed: %s", e)

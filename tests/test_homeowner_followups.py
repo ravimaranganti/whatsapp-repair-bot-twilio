@@ -24,7 +24,7 @@ def test_no_reply_waits_twenty_hours_and_fires_once():
     assert no_reply_is_due(fresh, [], NOW) is False
     sent = {**job, "no_reply_followup_sent": True}
     assert no_reply_is_due(sent, [], NOW) is False
-    quoted = [{"status": "details_given", "availability_text": "tomorrow"}]
+    quoted = [{"status": "details_given", "availability_text": "tomorrow", "estimate_text": "$80"}]
     assert no_reply_is_due(job, quoted, NOW) is False
 
 
@@ -69,6 +69,7 @@ def test_pass_shows_the_other_pending_quote():
             "status": "details_given",
             "availability_text": "tomorrow",
             "responded_at": _hours_ago(1),
+            "estimate_text": "$90",
         },
     ]
     nxt = next_pending_quote(responses, "111")

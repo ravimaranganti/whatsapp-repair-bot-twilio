@@ -84,6 +84,13 @@ FEE_LABELS = {
     "tier_100_plus": "$100+ service call fee",
 }
 
+# Shown as the quote price when the pro will inspect before pricing the repair.
+VISIT_PRICE_LABELS = {
+    "free_estimate": "Free in-person estimate",
+    "tier_50_99": "$50–$99 diagnostic fee, repair quoted on-site",
+    "tier_100_plus": "$100+ diagnostic fee, repair quoted on-site",
+}
+
 _FEE_PHRASES = {
     "free estimate": "free_estimate",
     "free": "free_estimate",
@@ -111,3 +118,8 @@ def interpret_dispatch_fee(text: str, payload: str = "") -> str | None:
 
 def fee_label(key: str | None) -> str:
     return FEE_LABELS.get(key or "", "")
+
+
+def visit_price_label(key: str | None) -> str:
+    """Price line for a visit when the repair itself is quoted after inspection."""
+    return VISIT_PRICE_LABELS.get(key or "", "")

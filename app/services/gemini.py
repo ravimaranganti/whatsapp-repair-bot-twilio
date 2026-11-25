@@ -279,6 +279,84 @@ class GeminiService:
         )
         return text or "I am not sure how to answer that — try sending a photo of the issue."
 
+    async def parse_pro_job_reply(
+        self,
+        *,
+        message: str,
+        profile_summary: str,
+        job_summary: str,
+        prior_draft: str,
+    ) -> dict[str, Any]:
+        """Classify a pro's free-form reply and pull out a quote or a question."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "enum": [
+                        "QUOTE_READY",
+                        "QUESTION_ONLY",
+                        "QUOTE_WITH_QUESTION",
+                        "MISSING_INFO",
+                    ],
+                },
+                "availability_text": {"type": "string"},
+                "price_estimate": {"type": "string"},
+                "caveats_or_notes": {"type": "string"},
+                "question_for_homeowner": {"type": "string"},
+                "missing_field_prompt": {"type": "string"},
+            },
+            "required": [
+                "intent",
+                "availability_text",
+                "price_estimate",
+                "caveats_or_notes",
+                "question_for_homeowner",
+                "missing_field_prompt",
+            ],
+        }
+        prompt = (
+            "Classify this professional's WhatsApp reply. They already tapped "
+            "Interested on the job.\n"
+            "QUOTE_READY: both a time they can come and a rough price, and no "
+            "question for the homeowner.\n"
+            "QUOTE_WITH_QUESTION: both a time and a price, plus a question the "
+            "homeowner should answer.\n"
+            "QUESTION_ONLY: they ask a clarifying question instead of quoting. "
+            "Put that question in question_for_homeowner. Leave price empty. "
+            "Do not treat this as a missing price or time.\n"
+            "If they give a time and say they need to inspect, see the job, or "
+            "visit before pricing the repair, extract the time, leave "
+            "price_estimate empty, and put that note in caveats_or_notes. "
+            "Do not copy the profile service-call fee into the price.\n"
+            "MISSING_INFO: they are quoting a repair price but left out the time "
+            "or the price, and they did not ask a question. "
+            "missing_field_prompt asks only for what is still missing.\n"
+            "Do not invent a price, a time, or a question. Keep their wording. "
+            "A range stays a range. Combine the prior draft with this message.\n\n"
+            f"Profile: {profile_summary}\n"
+            f"Job: {job_summary}\n"
+            f"Prior draft: {prior_draft}\n"
+            f"New message: {message}"
+        )
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                self.client.models.generate_content,
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=(
+                        "You extract structured quote details from a professional's "
+                        "short WhatsApp message. Return only the requested JSON."
+                    ),
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                ),
+            ),
+            timeout=30,
+        )
+        return json.loads(response.text or "{}")
+
     async def extract_pro_details(self, free_text: str) -> dict[str, Any]:
         """Structured extract of availability + estimate from pro free text."""
         schema = {

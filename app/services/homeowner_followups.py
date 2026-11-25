@@ -44,7 +44,11 @@ def _aware(ts: datetime) -> datetime:
 
 
 def quote_is_pending(response: dict[str, Any]) -> bool:
-    return response.get("status") == "details_given" and bool(response.get("availability_text"))
+    return (
+        response.get("status") == "details_given"
+        and bool(response.get("availability_text"))
+        and bool(response.get("estimate_text"))
+    )
 
 
 def next_pending_quote(
