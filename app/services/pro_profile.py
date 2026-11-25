@@ -56,6 +56,21 @@ def language_label(languages: list[str] | None) -> str:
     return ""
 
 
+def interpret_photo_estimate(text: str, payload: str = "") -> bool | None:
+    """Yes means a rough price from photos is free. None means the reply was unclear."""
+    pl = (payload or "").strip().lower()
+    if pl == "photo_est_yes":
+        return True
+    if pl == "photo_est_no":
+        return False
+    phrase = _norm(text).replace(",", "")
+    if phrase in {"yes", "y", "yeah", "sure", "yes for free", "free"}:
+        return True
+    if phrase in {"no", "nope", "not free"}:
+        return False
+    return None
+
+
 def interpret_insured(text: str, payload: str = "") -> bool | None:
     pl = (payload or "").strip().lower()
     if pl == INSURED_YES:
@@ -89,6 +104,8 @@ def pro_fit_line(pro: dict | None) -> str:
         parts.append(label)
     if data.get("insured") is True:
         parts.append("Insured")
+    if data.get("free_photo_estimate") is True:
+        parts.append("Free photo estimate")
     return " · ".join(parts)
 
 

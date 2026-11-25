@@ -122,10 +122,12 @@ def test_profile_form_uses_existing_area_and_fee_keys():
         "service_areas": ["sugar_land"],
         "languages": ["en", "es"],
         "insured": "yes",
+        "free_photo_estimate": "yes",
         "profile_notes": "12 years, tankless heaters",
     })
     assert with_language["languages"] == ["en", "es"]
     assert with_language["insured"] is True
+    assert with_language["free_photo_estimate"] is True
     assert "tankless" in with_language["profile_notes"]
 
 

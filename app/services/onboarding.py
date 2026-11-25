@@ -23,6 +23,7 @@ from app.services.pro_profile import (
     clean_profile_note,
     interpret_insured,
     interpret_languages,
+    interpret_photo_estimate,
     language_label,
     needs_insurance_question,
 )
@@ -87,6 +88,8 @@ _ONBOARDING_IDS = frozenset(
         "lang_both",
         "insured_yes",
         "insured_no",
+        "photo_est_yes",
+        "photo_est_no",
     }
 )
 _ONBOARDING_TITLES = frozenset(
@@ -108,6 +111,8 @@ _ONBOARDING_TITLES = frozenset(
         "both",
         "yes, insured",
         "not insured",
+        "yes, for free",
+        "no, not free",
         "mobile auto repair",
         "mobile mechanic",
         "car detailing",
@@ -444,7 +449,24 @@ async def _send_fee_prompt(phone: str) -> None:
 
 
 def _step_total(draft: dict[str, Any]) -> int:
-    return 10 if needs_insurance_question(draft.get("trades") or []) else 9
+    return 11 if needs_insurance_question(draft.get("trades") or []) else 10
+
+
+async def _send_photo_estimate_prompt(phone: str, draft: dict[str, Any]) -> None:
+    total = _step_total(draft)
+    sid = (settings.tpl_pro_photo_estimate_sid or "").strip()
+    if sid:
+        try:
+            await whatsapp_service.send_content_template(phone, content_sid=sid)
+            return
+        except Exception as e:
+            logger.warning("pro photo-estimate prompt failed: %s", e)
+    await whatsapp_service.send_text_message(
+        phone,
+        f"*Step 7 of {total}:* If a homeowner sends photos of the issue, "
+        "can you give a rough estimate for free?\n\n"
+        "Reply *Yes* or *No*.",
+    )
 
 
 async def _send_language_prompt(phone: str, draft: dict[str, Any]) -> None:
@@ -458,7 +480,7 @@ async def _send_language_prompt(phone: str, draft: dict[str, Any]) -> None:
             logger.warning("pro language prompt failed: %s", e)
     await whatsapp_service.send_text_message(
         phone,
-        f"*Step 7 of {total}:* Which languages do you speak with customers?\n\n"
+        f"*Step 8 of {total}:* Which languages do you speak with customers?\n\n"
         "Reply *English*, *Spanish*, or *Both*.",
     )
 
@@ -473,14 +495,14 @@ async def _send_insured_prompt(phone: str) -> None:
             logger.warning("pro insured prompt failed: %s", e)
     await whatsapp_service.send_text_message(
         phone,
-        "*Step 8 of 10:* Are you insured for the plumbing, electrical, or HVAC work you do?\n\n"
+        "*Step 9 of 11:* Are you insured for the plumbing, electrical, or HVAC work you do?\n\n"
         "Reply *Yes, insured* or *Not insured*.",
     )
 
 
 async def _send_notes_prompt(phone: str, draft: dict[str, Any]) -> None:
     total = _step_total(draft)
-    step = 9 if needs_insurance_question(draft.get("trades") or []) else 8
+    step = 10 if needs_insurance_question(draft.get("trades") or []) else 9
     await whatsapp_service.send_text_message(
         phone,
         f"*Step {step} of {total}:* Anything else homeowners should know? "
@@ -609,12 +631,13 @@ async def handle_pro_command(phone: str, body: str) -> bool:
             f"Urgent calls: {'yes' if pro.get('accepts_emergency') else 'no' if 'accepts_emergency' in pro else '—'}\n"
             f"Lead time: {lead_label(pro.get('standard_lead_time')) or pro.get('availability_text') or '—'}\n"
             f"Service call: {fee_label(pro.get('dispatch_fee_tier')) or pro.get('rate_text') or '—'}\n"
+            f"Free photo estimate: {'yes' if pro.get('free_photo_estimate') is True else 'no' if pro.get('free_photo_estimate') is False else '—'}\n"
             f"Languages: {language_label(pro.get('languages')) or '—'}\n"
             f"Insured: {'yes' if pro.get('insured') is True else 'no' if pro.get('insured') is False else '—'}\n"
             f"About: {pro.get('profile_notes') or '—'}\n"
             f"Opted in: {'yes' if pro.get('opted_in') else 'no'}\n"
             f"Status: {pro.get('status') or '—'}\n\n"
-            "Reply *DASHBOARD* to change areas, urgent calls, timing, fee, language, insurance, or your note. "
+            "Reply *DASHBOARD* to change areas, urgent calls, timing, fee, photo estimates, language, insurance, or your note. "
             "Reply *JOIN* to change your name, business, or trades. Reply *HELP* for the full menu."
         )
         await whatsapp_service.send_text_message(phone_n, msg)
@@ -793,10 +816,25 @@ async def continue_onboarding(
         draft["rate_text"] = fee_label(fee)
         ctx.update({"step": 7, "draft": draft})
         await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
-        await _send_language_prompt(phone_n, draft)
+        await _send_photo_estimate_prompt(phone_n, draft)
         return True
 
     if step == 7:
+        answer = interpret_photo_estimate(text, payload)
+        if answer is None:
+            await whatsapp_service.send_text_message(
+                phone_n,
+                "Tap *Yes, for free* if you can price it from photos, or *No, not free* if you cannot.",
+            )
+            await _send_photo_estimate_prompt(phone_n, draft)
+            return True
+        draft["free_photo_estimate"] = answer
+        ctx.update({"step": 8, "draft": draft})
+        await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
+        await _send_language_prompt(phone_n, draft)
+        return True
+
+    if step == 8:
         languages = interpret_languages(text, payload)
         if not languages:
             await whatsapp_service.send_text_message(
@@ -806,17 +844,17 @@ async def continue_onboarding(
             return True
         draft["languages"] = languages
         if needs_insurance_question(draft.get("trades") or []):
-            ctx.update({"step": 8, "draft": draft})
+            ctx.update({"step": 9, "draft": draft})
             await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
             await _send_insured_prompt(phone_n)
         else:
             draft["insured"] = None
-            ctx.update({"step": 9, "draft": draft})
+            ctx.update({"step": 10, "draft": draft})
             await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
             await _send_notes_prompt(phone_n, draft)
         return True
 
-    if step == 8:
+    if step == 9:
         insured = interpret_insured(text, payload)
         if insured is None:
             await whatsapp_service.send_text_message(
@@ -825,12 +863,12 @@ async def continue_onboarding(
             await _send_insured_prompt(phone_n)
             return True
         draft["insured"] = insured
-        ctx.update({"step": 9, "draft": draft})
+        ctx.update({"step": 10, "draft": draft})
         await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
         await _send_notes_prompt(phone_n, draft)
         return True
 
-    if step == 9:
+    if step == 10:
         note = clean_profile_note(text)
         if note is None:
             await whatsapp_service.send_text_message(
@@ -839,12 +877,12 @@ async def continue_onboarding(
             await _send_notes_prompt(phone_n, draft)
             return True
         draft["profile_notes"] = note
-        ctx.update({"step": 10, "draft": draft})
+        ctx.update({"step": 11, "draft": draft})
         await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
         await _send_opt_in_prompt(phone_n, draft)
         return True
 
-    if step == 10:
+    if step == 11:
         if text.lower() in {"yes", "y", "yeah", "sure"}:
             from datetime import datetime, timezone
 
@@ -862,6 +900,7 @@ async def continue_onboarding(
                 rate_text=draft.get("rate_text"),
                 languages=draft.get("languages") or [],
                 insured=draft.get("insured"),
+                free_photo_estimate=draft.get("free_photo_estimate"),
                 profile_notes=draft.get("profile_notes") or "",
                 opted_in=True,
                 opted_in_at=datetime.now(timezone.utc).isoformat(),
@@ -877,11 +916,12 @@ async def continue_onboarding(
                 f"Trades: {trades}\nAreas: {areas}\n"
                 f"{capacity_summary(draft.get('accepts_emergency'), draft.get('standard_lead_time'))}\n"
                 f"Service call: {fee_label(draft.get('dispatch_fee_tier')) or '—'}\n"
+                f"Free photo estimate: {'yes' if draft.get('free_photo_estimate') is True else 'no' if draft.get('free_photo_estimate') is False else '—'}\n"
                 f"Languages: {language_label(draft.get('languages')) or '—'}\n"
                 f"Insured: {'yes' if draft.get('insured') is True else 'no' if draft.get('insured') is False else '—'}\n"
                 f"About: {draft.get('profile_notes') or '—'}\n\n"
                 "We'll message you when a matching job comes in.\n\n"
-                "Reply *DASHBOARD* for your jobs and to update areas, timing, fee, language, insurance, or your note. "
+                "Reply *DASHBOARD* for your jobs and to update areas, timing, fee, photo estimates, language, insurance, or your note. "
                 "Reply *JOIN* again to change your name, business, or trades. Reply *HELP* anytime.",
             )
             await log_event(

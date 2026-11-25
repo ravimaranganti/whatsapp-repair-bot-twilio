@@ -152,6 +152,10 @@ class Settings(BaseSettings):
         default="",
         description="In-session English / Spanish / Both buttons. No WhatsApp approval.",
     )
+    tpl_pro_photo_estimate_sid: str = Field(
+        default="",
+        description="In-session yes/no for a free rough estimate from photos. No WhatsApp approval.",
+    )
     tpl_pro_insured_sid: str = Field(
         default="",
         description="In-session insured yes/no for plumbing, electrical, and HVAC.",

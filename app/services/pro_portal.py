@@ -125,6 +125,9 @@ def clean_profile_form(data: dict[str, Any]) -> dict[str, Any] | str:
     insured = str(data.get("insured") or "")
     if insured in {"yes", "no"}:
         cleaned["insured"] = insured == "yes"
+    photo = str(data.get("free_photo_estimate") or "")
+    if photo in {"yes", "no"}:
+        cleaned["free_photo_estimate"] = photo == "yes"
     return cleaned
 
 
@@ -265,6 +268,7 @@ async def load_dashboard(phone: str) -> dict[str, Any]:
         "languages": list(pro.get("languages") or []),
         "show_insured": needs_insurance_question(list(pro.get("trades") or [])),
         "insured": pro.get("insured"),
+        "free_photo_estimate": pro.get("free_photo_estimate"),
         "profile_notes": pro.get("profile_notes") or "",
     }
 

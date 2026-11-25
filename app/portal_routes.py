@@ -154,6 +154,7 @@ async def pro_profile_save(request: Request):
             "service_areas": areas,
             "languages": form.getlist("languages"),
             "insured": form.get("insured"),
+            "free_photo_estimate": form.get("free_photo_estimate"),
             "profile_notes": form.get("profile_notes"),
         },
     )

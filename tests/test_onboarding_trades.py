@@ -75,6 +75,15 @@ def test_mobile_auto_repair_from_tap_or_text():
     assert typed.trades == ["mobile_auto"]
 
 
+def test_photo_estimate_yes_and_no():
+    from app.services.pro_profile import interpret_photo_estimate
+
+    assert interpret_photo_estimate("Yes, for free", "photo_est_yes") is True
+    assert interpret_photo_estimate("No, not free", "photo_est_no") is False
+    assert interpret_photo_estimate("maybe", "") is None
+    assert is_onboarding_tap("photo_est_yes", "Yes, for free", interactive=True)
+
+
 def test_language_and_insurance_taps_stay_on_setup():
     assert is_onboarding_tap("lang_both", "Both", interactive=True)
     assert is_onboarding_tap("insured_yes", "Yes, insured", interactive=True)

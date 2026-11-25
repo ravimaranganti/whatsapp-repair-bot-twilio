@@ -138,6 +138,13 @@
           {% endfor %}
         </select>
       </label>
+      <label>Free rough estimate from photos
+        <select name="free_photo_estimate">
+          <option value="" {% if free_photo_estimate is not sameas true and free_photo_estimate is not sameas false %}selected{% endif %}>Choose one</option>
+          <option value="yes" {% if free_photo_estimate is sameas true %}selected{% endif %}>Yes, for free</option>
+          <option value="no" {% if free_photo_estimate is sameas false %}selected{% endif %}>No</option>
+        </select>
+      </label>
       <div>
         <b>Languages you speak with customers</b>
         <label class="check">

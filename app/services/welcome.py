@@ -94,7 +94,7 @@ def help_pro_text() -> str:
     lines = [
         "*Pro menu*",
         "- *PROFILE* — see your profile",
-        "- *DASHBOARD* — your jobs, plus areas, urgent calls, timing, fee, language, insurance, and your note",
+        "- *DASHBOARD* — your jobs, plus areas, urgent calls, timing, fee, photo estimates, language, insurance, and your note",
         "- *JOIN* — change your name, business, or trades",
         "- *PAUSE* / *RESUME* — pause or resume alerts",
         "- *STOP* — unsubscribe",
