@@ -39,21 +39,33 @@ from app.utils.phones import normalize_phone
 
 logger = logging.getLogger(__name__)
 
-# Button / list ids. "other" asks them to type a trade that is not in the list.
-# WhatsApp list pickers allow 10 rows. Other is the last row, so nine named trades.
+# Painting is part of handyman, not its own row. Pool, lawn, and sprinkler are
+# typed under Other. Mobile mechanic and cleaning are their own rows.
 TRADE_CHOICES: list[tuple[str, str]] = [
     ("plumbing", "Plumbing"),
     ("electrical", "Electrical"),
     ("hvac", "HVAC"),
     ("appliance", "Appliance"),
     ("handyman", "Handyman"),
-    ("painting", "Painting"),
     ("general_contractor", "General contractor"),
-    ("pool", "Pool"),
-    ("lawn", "Lawn & garden"),
-    ("mobile_auto", "Mobile auto repair"),
+    ("mobile_auto", "Mobile mechanic"),
+    ("cleaning", "Cleaning service"),
 ]
-TRADE_MAP = {key: key for key, _label in TRADE_CHOICES}
+_EXTRA_TRADE_LABELS = {
+    "painting": "Painting",
+    "pool": "Pool",
+    "lawn": "Lawn",
+    "sprinkler": "Sprinkler",
+}
+TRADE_LABELS = {key: label for key, label in TRADE_CHOICES}
+TRADE_LABELS.update(_EXTRA_TRADE_LABELS)
+TRADE_MAP = {key: key for key in TRADE_LABELS}
+# Old buttons and words that now belong to a row above.
+_TRADE_REDIRECTS = {
+    "painting": "handyman",
+    "car_detailing": "mobile_auto",
+    "detailing": "mobile_auto",
+}
 TRADE_OTHER = "trade:other"
 TRADE_MORE_YES = "trade_more:yes"
 TRADE_MORE_NO = "trade_more:no"
@@ -97,6 +109,10 @@ _ONBOARDING_TITLES = frozenset(
         "yes, insured",
         "not insured",
         "mobile auto repair",
+        "mobile mechanic",
+        "car detailing",
+        "cleaning",
+        "painting",
     }
 )
 
@@ -115,9 +131,22 @@ _TRADE_ALIASES: dict[str, tuple[str, ...]] = {
     "plumbing": ("plumbing", "plumber", "plumbers"),
     "hvac": ("hvac", "air conditioning", "heating"),
     "electrical": ("electrical", "electrician", "electric"),
-    "handyman": ("handyman", "handy man"),
+    "handyman": (
+        "handyman",
+        "handy man",
+        "painting",
+        "painter",
+        "painters",
+        "paint",
+    ),
     "appliance": ("appliance", "appliances"),
-    "painting": ("painting", "painter", "painters", "paint"),
+    "cleaning": (
+        "cleaning service",
+        "cleaning",
+        "house cleaning",
+        "cleaner",
+        "housekeeper",
+    ),
     "general_contractor": (
         "general contractor",
         "general contracting",
@@ -125,9 +154,13 @@ _TRADE_ALIASES: dict[str, tuple[str, ...]] = {
         "remodeling",
         "renovation",
     ),
-    "pool": ("pool", "pools", "pool service"),
-    "lawn": ("lawn", "lawn care", "landscaping", "mowing"),
+    "pool": ("pool repair", "pool service", "pools", "pool"),
+    "lawn": ("lawn work", "lawn care", "landscaping", "mowing", "lawn"),
+    "sprinkler": ("sprinkler repair", "sprinklers", "sprinkler", "irrigation"),
     "mobile_auto": (
+        "car detailing",
+        "auto detailing",
+        "detailing",
         "mobile auto repair",
         "mobile auto",
         "auto repair",
@@ -173,14 +206,20 @@ def _norm_phrase(text: str) -> str:
     return " ".join(raw.split())
 
 
+def format_trades(trades: list[str] | None) -> str:
+    """Human labels for stored trade keys. Custom text is shown as typed."""
+    labels = [TRADE_LABELS.get(str(trade), str(trade)) for trade in (trades or [])]
+    return ", ".join(labels)
+
+
 def known_trades_in_text(text: str) -> list[str]:
-    """Pull standard trades out of a typed reply. Order follows TRADE_CHOICES."""
+    """Pull known trades out of a typed reply, including Other hints."""
     low = _norm_phrase(text)
     found: list[str] = []
-    for key, _label in TRADE_CHOICES:
-        for phrase in _TRADE_ALIASES[key]:
+    for key, phrases in _TRADE_ALIASES.items():
+        for phrase in phrases:
             if re.search(rf"\b{re.escape(phrase)}\b", low):
-                found.append(key)
+                found.append(_TRADE_REDIRECTS.get(key, key))
                 break
     return found
 
@@ -242,7 +281,7 @@ def interpret_trade_turn(
         return TradeTurn("ask_other")
 
     if pl.startswith("trade:"):
-        key = pl.split(":", 1)[1].strip()
+        key = _TRADE_REDIRECTS.get(pl.split(":", 1)[1].strip(), pl.split(":", 1)[1].strip())
         if key in TRADE_MAP and key not in selected:
             return TradeTurn("add", [key])
         if key in TRADE_MAP:
@@ -250,6 +289,9 @@ def interpret_trade_turn(
         return TradeTurn("invalid")
 
     if stage == "other":
+        known = [key for key in known_trades_in_text(text) if key not in selected]
+        if known:
+            return TradeTurn("add", known)
         custom = normalize_custom_trade(text)
         if not custom or custom in selected:
             return TradeTurn("invalid" if not custom else "add", [] if custom in selected else [])
@@ -271,31 +313,20 @@ def interpret_trade_turn(
 
 
 async def _send_trade_picker(phone: str) -> None:
-    """In-session list of trades. Falls back to text if the Content SID is missing."""
-    sid = (settings.tpl_pro_trades_sid or "").strip()
-    sent_list = False
-    if sid:
-        try:
-            await whatsapp_service.send_content_template(phone, content_sid=sid)
-            sent_list = True
-        except Exception as e:
-            logger.warning("pro trades list failed: %s", e)
-    if not sent_list:
-        lines = "\n".join(f"- {label}" for _key, label in TRADE_CHOICES)
-        await whatsapp_service.send_text_message(
-            phone,
-            "*Step 2:* Pick a trade. You can add more than one.\n\n"
-            f"{lines}\n"
-            "- Other\n\n"
-            "Reply with a trade, or type your own, like roofing or mobile auto repair. "
-            "After each one you can add another.",
-        )
-        return
-    await _send_mobile_auto_prompt(phone)
+    """Text list. The saved WhatsApp list still has painting, pool, and lawn as rows."""
+    lines = "\n".join(f"- {label}" for _key, label in TRADE_CHOICES)
+    await whatsapp_service.send_text_message(
+        phone,
+        "*Step 2:* Pick a trade. You can add more than one. "
+        "Handyman includes painting.\n\n"
+        f"{lines}\n"
+        "- Other\n\n"
+        "Reply with a trade. For pool, lawn, or sprinkler, reply *Other*.",
+    )
 
 
 async def _send_trade_more(phone: str, selected: list[str]) -> None:
-    summary = ", ".join(selected) or "none yet"
+    summary = format_trades(selected) or "none yet"
     sid = (settings.tpl_pro_trade_more_sid or "").strip()
     if sid:
         try:
@@ -314,26 +345,11 @@ async def _send_trade_more(phone: str, selected: list[str]) -> None:
     )
 
 
-async def _send_mobile_auto_prompt(phone: str) -> None:
-    """The main trade list is full, so this trade rides a second in-session button."""
-    sid = (settings.tpl_pro_trades_extra_sid or "").strip()
-    if sid:
-        try:
-            await whatsapp_service.send_content_template(phone, content_sid=sid)
-            return
-        except Exception as e:
-            logger.warning("mobile auto trade prompt failed: %s", e)
-    await whatsapp_service.send_text_message(
-        phone,
-        "Also available: reply *Mobile auto repair* if you come to the vehicle.",
-    )
-
-
 async def _ask_custom_trade(phone: str) -> None:
     await whatsapp_service.send_text_message(
         phone,
-        "What's the trade? Type it in your own words, like roofing, painting, "
-        "or garage doors.",
+        "What's the trade? Pool, lawn, and sprinkler go here. "
+        "You can also type something else, like roofing or garage doors.",
     )
 
 
@@ -573,7 +589,7 @@ async def handle_pro_command(phone: str, body: str) -> bool:
                 phone_n, "No pro profile yet. Reply JOIN to set one up."
             )
             return True
-        trades = ", ".join(pro.get("trades") or []) or "—"
+        trades = format_trades(pro.get("trades")) or "—"
         areas = format_areas(pro.get("service_areas")) or ", ".join(
             pro.get("service_zips") or []
         ) or "—"
@@ -590,7 +606,9 @@ async def handle_pro_command(phone: str, body: str) -> bool:
             f"Insured: {'yes' if pro.get('insured') is True else 'no' if pro.get('insured') is False else '—'}\n"
             f"About: {pro.get('profile_notes') or '—'}\n"
             f"Opted in: {'yes' if pro.get('opted_in') else 'no'}\n"
-            f"Status: {pro.get('status') or '—'}"
+            f"Status: {pro.get('status') or '—'}\n\n"
+            "Reply *DASHBOARD* to change areas, urgent calls, timing, fee, language, insurance, or your note. "
+            "Reply *JOIN* to change your name, business, or trades. Reply *HELP* for the full menu."
         )
         await whatsapp_service.send_text_message(phone_n, msg)
         return True
@@ -843,7 +861,7 @@ async def continue_onboarding(
                 status="active",
             )
             await conversation_state_store.clear(phone_n)
-            trades = ", ".join(draft.get("trades") or [])
+            trades = format_trades(draft.get("trades")) or "—"
             areas = format_areas(draft.get("service_areas")) or "—"
             await whatsapp_service.send_text_message(
                 phone_n,
@@ -855,7 +873,9 @@ async def continue_onboarding(
                 f"Languages: {language_label(draft.get('languages')) or '—'}\n"
                 f"Insured: {'yes' if draft.get('insured') is True else 'no' if draft.get('insured') is False else '—'}\n"
                 f"About: {draft.get('profile_notes') or '—'}\n\n"
-                "We'll message you when a matching job comes in.",
+                "We'll message you when a matching job comes in.\n\n"
+                "Reply *DASHBOARD* for your jobs and to update areas, timing, fee, language, insurance, or your note. "
+                "Reply *JOIN* again to change your name, business, or trades. Reply *HELP* anytime.",
             )
             await log_event(
                 phone=phone_n, role="pro", type="pro_opted_in", payload=draft

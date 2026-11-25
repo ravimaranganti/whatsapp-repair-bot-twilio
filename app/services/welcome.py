@@ -27,7 +27,7 @@ from app.services.onboarding import start_pro_onboarding
 from app.services.portal_commands import is_dashboard_command, is_pro_signup
 from app.services.pros import pro_store
 from app.services.whatsapp import whatsapp_service
-from app.utils.phones import normalize_phone
+from app.utils.phones import normalize_phone, to_e164
 
 logger = logging.getLogger(__name__)
 
@@ -49,18 +49,25 @@ HELP_HOMEOWNER = (
     "- Tell me access notes to save for a visit (gate code, parking, pets)\n"
     "- Reply *FEEDBACK* anytime"
 )
-HELP_PRO = (
-    "*Pro menu*\n"
-    "- *PROFILE* — see your profile\n"
-    "- *DASHBOARD* — link to your jobs\n"
-    "- *PAUSE* / *RESUME* — pause or resume alerts\n"
-    "- *STOP* — unsubscribe\n"
-    "- *FEEDBACK* — send feedback"
-)
+def help_pro_text() -> str:
+    """Pro HELP menu. The support line appears only when PRO_SUPPORT_PHONE is set."""
+    lines = [
+        "*Pro menu*",
+        "- *PROFILE* — see your profile",
+        "- *DASHBOARD* — your jobs, plus areas, urgent calls, timing, fee, language, insurance, and your note",
+        "- *JOIN* — change your name, business, or trades",
+        "- *PAUSE* / *RESUME* — pause or resume alerts",
+        "- *STOP* — unsubscribe",
+        "- *FEEDBACK* — send feedback",
+    ]
+    digits = normalize_phone(settings.pro_support_phone)
+    if len(digits) >= 10:
+        lines.append(f"Questions? Call or text {to_e164(digits)}.")
+    return "\n".join(lines)
 RETURNING_HOMEOWNER = "Welcome back! Send a photo of whatever needs fixing."
 PRO_IDLE = (
     "No open jobs right now. I'll message you when one matches your trade and area. "
-    "Reply *DASHBOARD* for your job list, or *PAUSE* or *PROFILE* anytime."
+    "Reply *DASHBOARD* for your job list, *PROFILE* to review it, or *HELP* for the menu."
 )
 PRO_UNSUBSCRIBED = (
     "You're unsubscribed from job alerts. Reply *JOIN* to resubscribe."
@@ -667,7 +674,7 @@ async def _apply(phone: str, decision: WelcomeDecision, loaded: dict[str, Any]) 
         return
 
     if action == "help_pro":
-        await whatsapp_service.send_text_message(phone, HELP_PRO)
+        await whatsapp_service.send_text_message(phone, help_pro_text())
         return
 
     if action == "status_homeowner_idle":
@@ -698,7 +705,7 @@ async def _apply(phone: str, decision: WelcomeDecision, loaded: dict[str, Any]) 
 
     if action in {"midflow_help", "midflow_status"}:
         if action == "midflow_help":
-            menu = HELP_PRO if decision.menu_role == "pro" else HELP_HOMEOWNER
+            menu = help_pro_text() if decision.menu_role == "pro" else HELP_HOMEOWNER
             await whatsapp_service.send_text_message(phone, menu)
         elif job and decision.menu_role != "pro":
             await whatsapp_service.send_text_message(

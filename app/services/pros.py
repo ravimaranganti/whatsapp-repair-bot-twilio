@@ -14,6 +14,20 @@ from app.utils.phones import normalize_phone, to_e164
 
 logger = logging.getLogger(__name__)
 
+# Painting is stored under handyman. Older profiles may still say painting.
+_TRADE_MATCH_GROUPS = (
+    frozenset({"handyman", "painting"}),
+)
+
+
+def _trades_that_match(trade: str) -> set[str]:
+    key = (trade or "").lower().strip()
+    for group in _TRADE_MATCH_GROUPS:
+        if key in group:
+            return set(group)
+    return {key} if key else set()
+
+
 # Map professionals.json categories → trade strings used in jobs/matching
 JSON_CATEGORY_TO_TRADE = {
     "plumbers": "plumbing",
@@ -103,7 +117,7 @@ class ProStore:
                 if p.get("status", "active") != "active":
                     continue
                 trades = [str(t).lower() for t in (p.get("trades") or [])]
-                if trade_l and trade_l not in trades:
+                if trade_l and not set(trades).intersection(_trades_that_match(trade_l)):
                     continue
                 if not pro_covers_zip(p, zip_s):
                     continue

@@ -92,6 +92,10 @@ class Settings(BaseSettings):
         default="",
         description="Optional JOIN <code>; when set, pros with the code bypass allowlist",
     )
+    pro_support_phone: str = Field(
+        default="",
+        description="Phone shown when a pro replies HELP. Empty hides the line.",
+    )
 
     # Phase 4 — dispatch
     max_pros_per_job: int = Field(default=4, ge=1, le=10)

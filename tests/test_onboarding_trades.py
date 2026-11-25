@@ -49,12 +49,22 @@ def test_duplicate_tap_adds_nothing_new():
 
 def test_expanded_trades_from_taps_and_text():
     paint = interpret_trade_turn("Painting", "trade:painting", "choose", [])
-    assert paint.trades == ["painting"]
-    both = interpret_trade_turn("pool and lawn care", "", "choose", [])
+    assert paint.trades == ["handyman"]
+    both = interpret_trade_turn("pool and lawn care", "", "other", [])
     assert both.trades == ["pool", "lawn"]
-    assert interpret_trade_turn("pool service", "", "choose", []).trades == ["pool"]
+    assert interpret_trade_turn("pool service", "", "other", []).trades == ["pool"]
+    assert interpret_trade_turn("sprinkler repair", "", "other", []).trades == ["sprinkler"]
     gc = interpret_trade_turn("general contractor", "", "choose", [])
     assert gc.trades == ["general_contractor"]
+
+
+def test_cleaning_and_mobile_mechanic_are_separate():
+    cleaning = interpret_trade_turn("Cleaning service", "trade:cleaning", "choose", [])
+    assert cleaning.trades == ["cleaning"]
+    mechanic = interpret_trade_turn("Mobile mechanic", "trade:mobile_auto", "choose", [])
+    assert mechanic.trades == ["mobile_auto"]
+    detailing = interpret_trade_turn("car detailing", "", "choose", [])
+    assert detailing.trades == ["mobile_auto"]
 
 
 def test_mobile_auto_repair_from_tap_or_text():

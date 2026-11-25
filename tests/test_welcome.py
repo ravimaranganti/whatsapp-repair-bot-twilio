@@ -8,6 +8,7 @@ from app.services.welcome import (
     MODE_AWAITING_ROLE,
     decide,
     handle_welcome,
+    help_pro_text,
     resolve_actor,
 )
 
@@ -217,3 +218,20 @@ def test_help_handler_does_not_clear_pick_state(monkeypatch):
 
     asyncio.run(run())
     assert cleared == []
+
+
+def test_help_pro_shows_support_phone_when_set(monkeypatch):
+    import app.services.welcome as welcome
+
+    monkeypatch.setattr(welcome.settings, "pro_support_phone", "+1 713-555-1212")
+    text = help_pro_text()
+    assert "DASHBOARD" in text
+    assert "JOIN" in text
+    assert "+17135551212" in text
+
+
+def test_help_pro_hides_phone_line_when_unset(monkeypatch):
+    import app.services.welcome as welcome
+
+    monkeypatch.setattr(welcome.settings, "pro_support_phone", "")
+    assert "Call or text" not in help_pro_text()
