@@ -171,6 +171,22 @@ class JobStore:
 
         return await asyncio.to_thread(_read)
 
+    async def list_in_states(self, states: set[str] | frozenset[str]) -> list[dict[str, Any]]:
+        """Pilot-scale scan for jobs in the given states."""
+        wanted = set(states)
+
+        def _read() -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for snap in self._db().collection(self._collection).stream():
+                data = snap.to_dict() or {}
+                if data.get("state") not in wanted:
+                    continue
+                data["job_id"] = snap.id
+                out.append(data)
+            return out
+
+        return await asyncio.to_thread(_read)
+
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
         def _read() -> dict[str, Any] | None:
             snap = self._db().collection(self._collection).document(job_id).get()

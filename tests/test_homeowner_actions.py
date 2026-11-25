@@ -12,7 +12,12 @@ def test_quote_buttons_carry_job_and_quote():
     passed = parse_homeowner_payload("decline_quote:job123:hash456")
     ask = parse_homeowner_payload("ask_quote:job123:hash456")
     assert book.action == "book_quote" and book.job_id == "job123" and book.quote_id == "hash456"
-    assert passed.action == "decline_quote"
+    assert passed.action == "pass_quote"
+    again = parse_homeowner_payload("pass_quote:job123:hash456")
+    assert again.action == "pass_quote" and again.quote_id == "hash456"
+    assert parse_homeowner_payload("keep_looking:job123").action == "keep_looking"
+    assert parse_homeowner_payload("close_job:job123").action == "close_job"
+    assert parse_homeowner_payload("retry_pros:job123").action == "retry_pros"
     assert ask.action == "ask_quote"
 
 

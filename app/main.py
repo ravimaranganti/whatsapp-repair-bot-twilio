@@ -259,6 +259,19 @@ async def tasks_job_followup(request: Request):
     return {"ok": True}
 
 
+@app.post("/api/cron/followups")
+async def cron_followups(
+    authorization: Optional[str] = Header(default=None),
+    x_cron_secret: Optional[str] = Header(default=None, alias="X-Cron-Secret"),
+):
+    """Cloud Scheduler entry. Sends the 20-hour homeowner check-ins once each."""
+    from app.services.homeowner_followups import cron_request_ok, run_homeowner_followups
+
+    if not cron_request_ok(authorization, x_cron_secret):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return await run_homeowner_followups()
+
+
 @app.post("/tasks/weekly-digest")
 async def tasks_weekly_digest():
     """Cloud Scheduler target (Monday morning)."""

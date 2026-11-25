@@ -20,7 +20,8 @@ class HomeownerTap:
 
 def parse_homeowner_payload(payload: str) -> HomeownerTap | None:
     """
-    book_quote:job:quote, decline_quote:job:quote, ask_quote:job:quote,
+    book_quote:job:quote, pass_quote:job:quote, decline_quote:job:quote,
+    ask_quote:job:quote, keep_looking:job, close_job:job, retry_pros:job,
     confirm_job:job, cancel_job:job, show_options:job,
     share:yes:job:quote, share:no:job:quote,
     new_issue:yes:job, new_issue:no:job,
@@ -35,8 +36,11 @@ def parse_homeowner_payload(payload: str) -> HomeownerTap | None:
     rest = [part.strip() for part in parts[1:]]
     if action == "pick" and len(rest) >= 2:
         return HomeownerTap("book_quote", rest[0], rest[1])
-    if action in {"book_quote", "decline_quote", "ask_quote"} and len(rest) >= 2:
-        return HomeownerTap(action, rest[0], rest[1])
+    if action in {"book_quote", "ask_quote", "pass_quote", "decline_quote"} and len(rest) >= 2:
+        name = "pass_quote" if action in {"pass_quote", "decline_quote"} else action
+        return HomeownerTap(name, rest[0], rest[1])
+    if action in {"keep_looking", "close_job", "retry_pros"} and rest and rest[0]:
+        return HomeownerTap(action, rest[0])
     if action == "share" and len(rest) >= 3 and rest[0] in {"yes", "no"}:
         name = "share_yes" if rest[0] == "yes" else "share_no"
         return HomeownerTap(name, rest[1], rest[2])

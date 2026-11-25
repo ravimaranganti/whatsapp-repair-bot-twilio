@@ -178,6 +178,22 @@ class Settings(BaseSettings):
     )
 
     # Phase 5
+    cron_secret: str = Field(
+        default="",
+        description="Shared secret for Cloud Scheduler calls to /api/cron/followups.",
+    )
+    tpl_keep_looking_sid: str = Field(
+        default="",
+        description="In-session Keep Looking / Cancel Request after the only quote is passed.",
+    )
+    tpl_no_reply_followup_sid: str = Field(
+        default="",
+        description="In-session Ask Again / Leave It when no quote has arrived.",
+    )
+    tpl_quote_reminder_sid: str = Field(
+        default="",
+        description="In-session reminder for a quote the homeowner has not booked or passed.",
+    )
     operator_phone: str = Field(
         default="",
         description="E.164 phone that receives the weekly digest",
