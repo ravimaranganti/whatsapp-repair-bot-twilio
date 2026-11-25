@@ -1,12 +1,18 @@
 """Trade selection during pro onboarding: taps, typed names, and Other."""
 
-from app.services.onboarding import interpret_trade_turn
+from app.services.onboarding import interpret_trade_turn, is_onboarding_tap
 
 
 def test_tap_standard_trade():
     turn = interpret_trade_turn("Plumbing", "trade:plumbing", "choose", [])
     assert turn.action == "add"
     assert turn.trades == ["plumbing"]
+
+
+def test_old_other_tap_is_recognized_after_setup():
+    assert is_onboarding_tap("trade:other", "Other", interactive=True)
+    assert is_onboarding_tap("", "Other", interactive=True)
+    assert not is_onboarding_tap("", "other than the sink", interactive=False)
 
 
 def test_tap_other_asks_for_text():

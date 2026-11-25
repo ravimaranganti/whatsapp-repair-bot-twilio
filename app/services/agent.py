@@ -100,16 +100,24 @@ async def process_message(message: MessageContent, sender: str):
                 return
 
         # Pro commands / onboarding
-        from app.services.onboarding import continue_onboarding, handle_pro_command
+        from app.services.onboarding import (
+            continue_onboarding,
+            handle_finished_setup_tap,
+            handle_pro_command,
+            is_onboarding_tap,
+        )
 
         if await handle_pro_command(phone, message.body or ""):
             return
+        tap = message.button_payload or message.list_id or ""
         if mode == MODE_PRO_ONBOARDING:
-            trade_payload = message.button_payload or message.list_id or ""
-            if await continue_onboarding(
-                phone, message.body or "", state, trade_payload
-            ):
+            if await continue_onboarding(phone, message.body or "", state, tap):
                 return
+        elif is_onboarding_tap(
+            tap, message.body or "", interactive=message.type == "interactive"
+        ):
+            await handle_finished_setup_tap(phone)
+            return
 
         # Pro alert responses / details
         from app.services.dispatch import (

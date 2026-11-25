@@ -108,6 +108,26 @@ class Settings(BaseSettings):
         default="",
         description="In-session quick reply: add another trade or that's all. No WhatsApp approval.",
     )
+    tpl_pro_areas_sid: str = Field(
+        default="",
+        description="In-session list picker for Houston service areas. No WhatsApp approval.",
+    )
+    tpl_pro_area_more_sid: str = Field(
+        default="",
+        description="In-session quick reply: add another area or that's all. No WhatsApp approval.",
+    )
+    tpl_pro_emergency_sid: str = Field(
+        default="",
+        description="In-session yes/no for same-day or urgent calls. No WhatsApp approval.",
+    )
+    tpl_pro_lead_time_sid: str = Field(
+        default="",
+        description="In-session lead-time buttons for standard jobs. No WhatsApp approval.",
+    )
+    tpl_pro_fee_sid: str = Field(
+        default="",
+        description="In-session service-call fee buttons. No WhatsApp approval.",
+    )
 
     # Phase 5
     operator_phone: str = Field(

@@ -1,6 +1,6 @@
 """Unit tests for pro ranking."""
 
-from app.services.matching import public_pro_card, rank_pros
+from app.services.matching import filter_pros_for_severity, public_pro_card, rank_pros
 
 
 def _pro(name, avail, rate, rating, phone="1"):
@@ -24,6 +24,18 @@ def test_high_severity_prefers_fast():
     assert ranked[0]["name"] == "Fast"
 
 
+def test_low_severity_prefers_free_estimate_over_a_call_fee():
+    pros = [
+        _pro("Pricey", "Same day", "$200/hr", 5.0, "1"),
+        {
+            **_pro("Free", "Within a week", "", 4.0, "2"),
+            "dispatch_fee_tier": "free_estimate",
+        },
+    ]
+    ranked = rank_pros(pros, "low")
+    assert ranked[0]["name"] == "Free"
+
+
 def test_low_severity_prefers_cheap():
     pros = [
         _pro("Pricey", "Same day", "$200/hr", 5.0, "1"),
@@ -31,6 +43,16 @@ def test_low_severity_prefers_cheap():
     ]
     ranked = rank_pros(pros, "low")
     assert ranked[0]["name"] == "Budget"
+
+
+def test_urgent_jobs_skip_scheduled_only_pros():
+    pros = [
+        {"name": "Urgent", "accepts_emergency": True, "standard_lead_time": "same_day"},
+        {"name": "Scheduled", "accepts_emergency": False, "standard_lead_time": "three_plus_days"},
+    ]
+    urgent = filter_pros_for_severity(pros, "emergency")
+    assert [p["name"] for p in urgent] == ["Urgent"]
+    assert len(filter_pros_for_severity(pros, "low")) == 2
 
 
 def test_public_card_hides_phone():

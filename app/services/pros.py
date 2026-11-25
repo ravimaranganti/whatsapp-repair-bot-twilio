@@ -9,6 +9,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
+from app.services.service_areas import pro_covers_zip
 from app.utils.phones import normalize_phone, to_e164
 
 logger = logging.getLogger(__name__)
@@ -104,9 +105,7 @@ class ProStore:
                 trades = [str(t).lower() for t in (p.get("trades") or [])]
                 if trade_l and trade_l not in trades:
                     continue
-                zips = [str(z).strip() for z in (p.get("service_zips") or [])]
-                if zip_s and zips and zip_s not in zips:
-                    # Also allow empty zip list during early pilot seed
+                if not pro_covers_zip(p, zip_s):
                     continue
                 out.append(p)
             return out

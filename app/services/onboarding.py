@@ -11,13 +11,26 @@ from app.config import settings
 from app.models import MODE_IDLE, MODE_PRO_ONBOARDING
 from app.services.conversation_state import conversation_state_store
 from app.services.events import log_event
+from app.services.pro_capacity import (
+    capacity_summary,
+    fee_label,
+    interpret_dispatch_fee,
+    interpret_emergency,
+    interpret_lead_time,
+    lead_label,
+)
 from app.services.pros import pro_store
+from app.services.service_areas import (
+    AREA_ALL,
+    AREA_CHOICES,
+    format_areas,
+    interpret_area_turn,
+    zips_for_areas,
+)
 from app.services.whatsapp import whatsapp_service
 from app.utils.phones import normalize_phone
 
 logger = logging.getLogger(__name__)
-
-AVAIL_OPTIONS = ["Same day", "Next day", "Within a week"]
 
 # Button / list ids. "other" asks them to type a trade that is not in the list.
 # WhatsApp list pickers allow 10 rows. Other is the last row, so nine named trades.
@@ -36,6 +49,48 @@ TRADE_MAP = {key: key for key, _label in TRADE_CHOICES}
 TRADE_OTHER = "trade:other"
 TRADE_MORE_YES = "trade_more:yes"
 TRADE_MORE_NO = "trade_more:no"
+
+# Taps from an earlier setup bubble. WhatsApp keeps those messages tappable.
+_ONBOARDING_PREFIXES = ("trade:", "trade_more:", "area:", "area_more:")
+_ONBOARDING_IDS = frozenset(
+    {
+        "emerg_yes",
+        "emerg_no",
+        "lead_same_day",
+        "lead_48h",
+        "lead_3plus",
+        "fee_free",
+        "fee_50_99",
+        "fee_100_plus",
+    }
+)
+_ONBOARDING_TITLES = frozenset(
+    {
+        "other",
+        "add another",
+        "that's all",
+        "thats all",
+        "yes, same-day/urgent",
+        "no, scheduled only",
+        "same day",
+        "next 48 hours",
+        "3+ days out",
+        "free estimate",
+        "$50 - $99 fee",
+        "$100+ fee",
+    }
+)
+
+
+def is_onboarding_tap(payload: str, text: str = "", *, interactive: bool = False) -> bool:
+    """True for a setup button or list row, including one left behind in the thread."""
+    pl = (payload or "").strip().lower()
+    if pl.startswith(_ONBOARDING_PREFIXES) or pl in _ONBOARDING_IDS:
+        return True
+    if not interactive:
+        return False
+    title = " ".join((text or "").strip().lower().split())
+    return title in _ONBOARDING_TITLES
 
 _TRADE_ALIASES: dict[str, tuple[str, ...]] = {
     "plumbing": ("plumbing", "plumber", "plumbers"),
@@ -85,10 +140,6 @@ _NOT_A_TRADE = frozenset(
         "menu",
     }
 )
-
-
-def parse_zips(text: str) -> list[str]:
-    return re.findall(r"\b\d{5}\b", text or "")
 
 
 def _norm_phrase(text: str) -> str:
@@ -203,7 +254,7 @@ async def _send_trade_picker(phone: str) -> None:
     lines = "\n".join(f"- {label}" for _key, label in TRADE_CHOICES)
     await whatsapp_service.send_text_message(
         phone,
-        "*Step 2/6:* Pick a trade. You can add more than one.\n\n"
+        "*Step 2/7:* Pick a trade. You can add more than one.\n\n"
         f"{lines}\n"
         "- Other\n\n"
         "Reply with a trade, or type your own, like roofing. "
@@ -239,6 +290,96 @@ async def _ask_custom_trade(phone: str) -> None:
     )
 
 
+async def _send_area_picker(phone: str) -> None:
+    """In-session list of Houston areas. Falls back to text if the SID is missing."""
+    sid = (settings.tpl_pro_areas_sid or "").strip()
+    if sid:
+        try:
+            await whatsapp_service.send_content_template(phone, content_sid=sid)
+            return
+        except Exception as e:
+            logger.warning("pro areas list failed: %s", e)
+    lines = "\n".join(f"- {label}" for _key, label, _note in AREA_CHOICES)
+    await whatsapp_service.send_text_message(
+        phone,
+        "*Step 3/7:* Where do you work? You can add more than one.\n\n"
+        f"{lines}\n\n"
+        "Reply with an area, like Katy or The Woodlands.",
+    )
+
+
+async def _send_area_more(phone: str, selected: list[str]) -> None:
+    summary = format_areas(selected) or "none yet"
+    sid = (settings.tpl_pro_area_more_sid or "").strip()
+    if sid:
+        try:
+            await whatsapp_service.send_text_message(
+                phone,
+                f"Added: {summary}. You can pick more than one.",
+            )
+            await whatsapp_service.send_content_template(phone, content_sid=sid)
+            return
+        except Exception as e:
+            logger.warning("pro area-more prompt failed: %s", e)
+    await whatsapp_service.send_text_message(
+        phone,
+        f"Added: {summary}. You can pick more than one.\n\n"
+        "Add another area? Reply *Yes* or *That's all*.",
+    )
+
+
+async def _send_emergency_prompt(phone: str) -> None:
+    sid = (settings.tpl_pro_emergency_sid or "").strip()
+    if sid:
+        try:
+            await whatsapp_service.send_content_template(phone, content_sid=sid)
+            return
+        except Exception as e:
+            logger.warning("pro emergency prompt failed: %s", e)
+    await whatsapp_service.send_text_message(
+        phone,
+        "*Step 4/7:* Do you take same-day or emergency calls when urgent jobs pop up?\n\n"
+        "Reply *Yes* or *No*.",
+    )
+
+
+async def _send_lead_time_prompt(phone: str) -> None:
+    sid = (settings.tpl_pro_lead_time_sid or "").strip()
+    if sid:
+        try:
+            await whatsapp_service.send_content_template(phone, content_sid=sid)
+            return
+        except Exception as e:
+            logger.warning("pro lead-time prompt failed: %s", e)
+    await whatsapp_service.send_text_message(
+        phone,
+        "*Step 5/7:* What's your typical lead time for standard, non-urgent jobs?\n\n"
+        "Reply *Same day*, *Next 48 hours*, or *3+ days*.",
+    )
+
+
+async def _send_fee_prompt(phone: str) -> None:
+    sid = (settings.tpl_pro_fee_sid or "").strip()
+    if sid:
+        try:
+            await whatsapp_service.send_content_template(phone, content_sid=sid)
+            return
+        except Exception as e:
+            logger.warning("pro fee prompt failed: %s", e)
+    await whatsapp_service.send_text_message(
+        phone,
+        "*Step 6/7:* What is your typical service call / diagnostic fee to come out and assess a job?\n\n"
+        "Reply *Free estimate*, *$50 – $99*, or *$100+*.",
+    )
+
+
+async def _advance_to_emergency(phone: str, ctx: dict[str, Any], draft: dict[str, Any]) -> None:
+    ctx.update({"step": 4, "draft": draft})
+    ctx.pop("area_stage", None)
+    await conversation_state_store.set(phone, MODE_PRO_ONBOARDING, ctx)
+    await _send_emergency_prompt(phone)
+
+
 def join_code_ok(body: str) -> bool:
     """JOIN or JOIN <code> — code required only when PRO_JOIN_CODE is set."""
     parts = (body or "").strip().split()
@@ -251,7 +392,7 @@ def join_code_ok(body: str) -> bool:
 
 
 async def start_pro_onboarding(phone: str) -> None:
-    """Begin the existing 6-step pro profile flow."""
+    """Begin the 7-step pro profile flow."""
     phone_n = normalize_phone(phone)
     await conversation_state_store.set(
         phone_n, MODE_PRO_ONBOARDING, {"step": 1, "draft": {}}
@@ -260,11 +401,34 @@ async def start_pro_onboarding(phone: str) -> None:
     await whatsapp_service.send_text_message(
         phone_n,
         "Welcome! Let's set up your pro profile.\n\n"
-        "*Step 1/6:* What's your name and business name?\n"
+        "*Step 1/7:* What's your name and business name?\n"
         "(e.g. Mike / Mike's Plumbing)",
     )
     await log_event(
         phone=phone_n, role="pro", type="pro_onboarding_started", payload={}
+    )
+
+
+async def handle_finished_setup_tap(phone: str) -> None:
+    """A tap on an old setup message after that step is no longer active."""
+    phone_n = normalize_phone(phone)
+    pro = await pro_store.get(phone_n)
+    if pro and (pro.get("trades") or pro.get("name")):
+        text = (
+            "That was from the setup you already finished, so I left your profile as it is.\n\n"
+            "Reply *PROFILE* to see it, or *JOIN* to set it up again."
+        )
+    else:
+        text = (
+            "That was from an earlier setup message, so I didn't start a new request.\n\n"
+            "Reply *JOIN* to sign up as a pro."
+        )
+    await whatsapp_service.send_text_message(phone_n, text)
+    await log_event(
+        phone=phone_n,
+        role="pro",
+        type="stale_onboarding_tap",
+        payload={"has_profile": bool(pro)},
     )
 
 
@@ -308,15 +472,18 @@ async def handle_pro_command(phone: str, body: str) -> bool:
             )
             return True
         trades = ", ".join(pro.get("trades") or []) or "—"
-        zips = ", ".join(pro.get("service_zips") or []) or "—"
+        areas = format_areas(pro.get("service_areas")) or ", ".join(
+            pro.get("service_zips") or []
+        ) or "—"
         msg = (
             f"*Your pro profile*\n"
             f"Name: {pro.get('name') or '—'}\n"
             f"Business: {pro.get('business_name') or '—'}\n"
             f"Trades: {trades}\n"
-            f"ZIPs: {zips}\n"
-            f"Availability: {pro.get('availability_text') or '—'}\n"
-            f"Rate: {pro.get('rate_text') or '—'}\n"
+            f"Areas: {areas}\n"
+            f"Urgent calls: {'yes' if pro.get('accepts_emergency') else 'no' if 'accepts_emergency' in pro else '—'}\n"
+            f"Lead time: {lead_label(pro.get('standard_lead_time')) or pro.get('availability_text') or '—'}\n"
+            f"Service call: {fee_label(pro.get('dispatch_fee_tier')) or pro.get('rate_text') or '—'}\n"
             f"Opted in: {'yes' if pro.get('opted_in') else 'no'}\n"
             f"Status: {pro.get('status') or '—'}"
         )
@@ -380,13 +547,10 @@ async def continue_onboarding(
                 )
                 await _send_trade_picker(phone_n)
                 return True
-            ctx.update({"step": 3, "draft": draft})
+            ctx.update({"step": 3, "area_stage": "choose", "draft": draft})
             ctx.pop("trade_stage", None)
             await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
-            await whatsapp_service.send_text_message(
-                phone_n,
-                "*Step 3/6:* Which ZIP codes do you serve? (e.g. 77002 77006 77019)",
-            )
+            await _send_area_picker(phone_n)
             return True
         if turn.action == "add":
             added = [trade for trade in turn.trades if trade not in selected]
@@ -412,51 +576,101 @@ async def continue_onboarding(
         return True
 
     if step == 3:
-        zips = parse_zips(text)
-        if not zips:
-            await whatsapp_service.send_text_message(
-                phone_n, "Please include at least one 5-digit ZIP code."
-            )
+        stage = str(ctx.get("area_stage") or "choose")
+        selected = list(draft.get("service_areas") or [])
+        turn = interpret_area_turn(text, payload, stage, selected)
+        if turn.action == "show_list":
+            ctx.update({"area_stage": "choose", "draft": draft})
+            await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
+            await _send_area_picker(phone_n)
             return True
-        draft["service_zips"] = zips
-        ctx.update({"step": 4, "draft": draft})
-        await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
+        if turn.action == "done":
+            if not selected:
+                await whatsapp_service.send_text_message(
+                    phone_n, "Pick at least one area before continuing."
+                )
+                await _send_area_picker(phone_n)
+                return True
+            await _advance_to_emergency(phone_n, ctx, draft)
+            return True
+        if turn.action == "add":
+            if AREA_ALL in turn.areas:
+                draft["service_areas"] = [AREA_ALL]
+                draft["service_zips"] = []
+                await _advance_to_emergency(phone_n, ctx, draft)
+                return True
+            added = [area for area in turn.areas if area not in selected and area != AREA_ALL]
+            selected = [area for area in selected if area != AREA_ALL]
+            if not added and not selected:
+                await _send_area_picker(phone_n)
+                return True
+            selected.extend(added)
+            draft["service_areas"] = selected
+            draft["service_zips"] = zips_for_areas(selected)
+            ctx.update({"area_stage": "more", "draft": draft})
+            await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
+            if not added:
+                await whatsapp_service.send_text_message(
+                    phone_n, "That's already on your list."
+                )
+            await _send_area_more(phone_n, selected)
+            return True
         await whatsapp_service.send_text_message(
             phone_n,
-            "*Step 4/6:* Typical availability? Reply: Same day / Next day / Within a week",
+            "Tap an area, or type one like Katy or The Woodlands.",
         )
+        await _send_area_picker(phone_n)
         return True
 
     if step == 4:
-        low = text.lower()
-        avail = None
-        for opt in AVAIL_OPTIONS:
-            if opt.lower() in low:
-                avail = opt
-                break
-        if not avail:
-            avail = text[:80]
-        draft["availability_text"] = avail
+        answer = interpret_emergency(text, payload)
+        if answer is None:
+            await whatsapp_service.send_text_message(
+                phone_n, "Tap *Yes* if you take urgent calls, or *No* if you only do scheduled work."
+            )
+            await _send_emergency_prompt(phone_n)
+            return True
+        draft["accepts_emergency"] = answer
         ctx.update({"step": 5, "draft": draft})
         await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
-        await whatsapp_service.send_text_message(
-            phone_n,
-            "*Step 5/6:* What's your typical rate or visit fee? (free text)",
-        )
+        await _send_lead_time_prompt(phone_n)
         return True
 
     if step == 5:
-        draft["rate_text"] = text[:120]
+        lead = interpret_lead_time(text, payload)
+        if not lead:
+            await whatsapp_service.send_text_message(
+                phone_n, "Tap *Same day*, *Next 48 hours*, or *3+ days*."
+            )
+            await _send_lead_time_prompt(phone_n)
+            return True
+        draft["standard_lead_time"] = lead
+        draft["availability_text"] = lead_label(lead)
         ctx.update({"step": 6, "draft": draft})
+        await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
+        await _send_fee_prompt(phone_n)
+        return True
+
+    if step == 6:
+        fee = interpret_dispatch_fee(text, payload)
+        if not fee:
+            await whatsapp_service.send_text_message(
+                phone_n, "Tap *Free estimate*, *$50 – $99*, or *$100+*."
+            )
+            await _send_fee_prompt(phone_n)
+            return True
+        draft["dispatch_fee_tier"] = fee
+        draft["rate_text"] = fee_label(fee)
+        ctx.update({"step": 7, "draft": draft})
         await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
         await whatsapp_service.send_text_message(
             phone_n,
-            "*Step 6/6:* You'll receive job alerts on WhatsApp. Reply STOP anytime.\n"
+            "*Step 7/7:* You'll receive job alerts on WhatsApp. Reply STOP anytime.\n"
             "Reply *Yes* to opt in, or *No* to cancel.",
         )
         return True
 
-    if step == 6:
+    if step == 7:
         if text.lower() in {"yes", "y", "yeah", "sure"}:
             from datetime import datetime, timezone
 
@@ -465,8 +679,12 @@ async def continue_onboarding(
                 name=draft.get("name"),
                 business_name=draft.get("business_name"),
                 trades=draft.get("trades") or [],
+                service_areas=draft.get("service_areas") or [],
                 service_zips=draft.get("service_zips") or [],
+                accepts_emergency=bool(draft.get("accepts_emergency")),
+                standard_lead_time=draft.get("standard_lead_time"),
                 availability_text=draft.get("availability_text"),
+                dispatch_fee_tier=draft.get("dispatch_fee_tier"),
                 rate_text=draft.get("rate_text"),
                 opted_in=True,
                 opted_in_at=datetime.now(timezone.utc).isoformat(),
@@ -474,14 +692,14 @@ async def continue_onboarding(
             )
             await conversation_state_store.clear(phone_n)
             trades = ", ".join(draft.get("trades") or [])
-            zips = ", ".join(draft.get("service_zips") or [])
+            areas = format_areas(draft.get("service_areas")) or "—"
             await whatsapp_service.send_text_message(
                 phone_n,
                 "You're in! Here's your summary:\n"
                 f"*{draft.get('business_name') or draft.get('name')}*\n"
-                f"Trades: {trades}\nZIPs: {zips}\n"
-                f"Avail: {draft.get('availability_text')}\n"
-                f"Rate: {draft.get('rate_text')}\n\n"
+                f"Trades: {trades}\nAreas: {areas}\n"
+                f"{capacity_summary(draft.get('accepts_emergency'), draft.get('standard_lead_time'))}\n"
+                f"Service call: {fee_label(draft.get('dispatch_fee_tier')) or '—'}\n\n"
                 "We'll message you when a matching job comes in.",
             )
             await log_event(

@@ -25,6 +25,7 @@ from app.services.events import log_event
 from app.services.homeowners import homeowner_store
 from app.services.jobs import job_store, resolve_pro_from_pick_payload
 from app.services.matching import select_pros_for_job
+from app.services.pro_capacity import fee_label
 from app.services.pros import pro_store
 from app.services.session_window import (
     choose_delivery,
@@ -539,8 +540,11 @@ async def maybe_send_homeowner_options(job_id: str, force: bool = False) -> None
         pro = await pro_store.get(r["pro_phone"])
         name = (pro or {}).get("business_name") or (pro or {}).get("name") or "Pro"
         rating = (pro or {}).get("rating_avg") or "—"
+        fee = fee_label((pro or {}).get("dispatch_fee_tier"))
+        fee_line = f"   Service call: {fee}\n" if fee else ""
         lines.append(
             f"*{i}. {name}* (★{rating})\n"
+            f"{fee_line}"
             f"   When: {r.get('availability_text')}\n"
             f"   Est: {r.get('estimate_text') or '—'}\n"
         )
