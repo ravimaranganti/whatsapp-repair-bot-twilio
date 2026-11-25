@@ -24,6 +24,7 @@ from app.services.events import log_event
 from app.services.homeowners import homeowner_store
 from app.services.jobs import ACTIVE_STATES, job_store
 from app.services.onboarding import start_pro_onboarding
+from app.services.portal_commands import is_dashboard_command, is_pro_signup
 from app.services.pros import pro_store
 from app.services.whatsapp import whatsapp_service
 from app.utils.phones import normalize_phone
@@ -51,6 +52,7 @@ HELP_HOMEOWNER = (
 HELP_PRO = (
     "*Pro menu*\n"
     "- *PROFILE* — see your profile\n"
+    "- *DASHBOARD* — link to your jobs\n"
     "- *PAUSE* / *RESUME* — pause or resume alerts\n"
     "- *STOP* — unsubscribe\n"
     "- *FEEDBACK* — send feedback"
@@ -58,7 +60,7 @@ HELP_PRO = (
 RETURNING_HOMEOWNER = "Welcome back! Send a photo of whatever needs fixing."
 PRO_IDLE = (
     "No open jobs right now. I'll message you when one matches your trade and area. "
-    "Reply *PAUSE* or *PROFILE* anytime."
+    "Reply *DASHBOARD* for your job list, or *PAUSE* or *PROFILE* anytime."
 )
 PRO_UNSUBSCRIBED = (
     "You're unsubscribed from job alerts. Reply *JOIN* to resubscribe."
@@ -301,6 +303,14 @@ def decide(
     text = text or ""
     payload = payload or ""
     join_code = (join_code or "").strip()
+
+    if is_dashboard_command(text):
+        return WelcomeDecision("send_dashboard")
+
+    if is_pro_signup(text) and not (
+        mode in IN_PROGRESS_MODES and mode != MODE_AWAITING_JOIN_CODE
+    ):
+        return WelcomeDecision("start_pro_onboarding")
 
     if _looks_like_join(text) and not (
         mode in IN_PROGRESS_MODES and mode != MODE_AWAITING_JOIN_CODE
@@ -634,6 +644,12 @@ async def _apply(phone: str, decision: WelcomeDecision, loaded: dict[str, Any]) 
             type="join_code_locked",
             payload={"attempts": decision.extra.get("attempts")},
         )
+        return
+
+    if action == "send_dashboard":
+        from app.services.portal_auth import send_dashboard_reply
+
+        await send_dashboard_reply(phone)
         return
 
     if action in {"start_pro_onboarding", "join_ok"}:

@@ -33,6 +33,7 @@ from app.services.jobs import job_store, resolve_pro_from_pick_payload
 from app.services.alert_reply import job_ref, resolve_alert_reply
 from app.services.matching import select_pros_for_job
 from app.services.pro_capacity import fee_label
+from app.services.pro_profile import pro_fit_line
 from app.services.pros import pro_store
 from app.services.session_window import (
     choose_delivery,
@@ -112,13 +113,7 @@ async def after_diagnosis(
     diagnosis: Diagnosis,
     photo_url: str | None,
 ) -> None:
-    """
-    Post-diagnosis UX: DIY buttons path or start consent/ZIP for dispatch.
-    When DISPATCH_ENABLED is false, only send diagnosis text (caller already did).
-    """
-    if not settings.dispatch_enabled:
-        return
-
+    """DIY steps, or ask for a ZIP and permission before any pro is contacted."""
     phone_n = normalize_phone(phone)
     await homeowner_store.ensure(phone_n)
 
@@ -609,8 +604,22 @@ async def dispatch_job(phone: str, ctx: dict[str, Any]) -> None:
         return
     await homeowner_store.update(phone_n, active_job_id=job_id)
 
+    if not settings.dispatch_enabled:
+        await job_store.set_state(job_id, "cancelled")
+        await homeowner_store.update(phone_n, active_job_id=None)
+        await conversation_state_store.clear(phone_n)
+        await whatsapp_service.send_text_message(
+            phone_n,
+            "I won't share your number or text a list of pros. "
+            "Matching real local pros from the bot is off right now.",
+        )
+        return
+
     pros = await select_pros_for_job(
-        trade=trade, area_zip=area_zip, severity=diag.severity.value
+        trade=trade,
+        area_zip=area_zip,
+        severity=diag.severity.value,
+        issue=diag.pro_brief.issue or "",
     )
     if not pros:
         await job_store.set_state(job_id, "cancelled")
@@ -693,12 +702,23 @@ async def _send_job_alert(
     issue_v = clean_template_value(issue, "home repair", limit=200)
     severity_v = clean_template_value(severity, "medium", limit=32)
     ref = clean_template_value(job_id, "this job", limit=32)
+    link_line = ""
+    try:
+        from app.services.portal_auth import LINK_TEXT, issue_magic_link
+
+        dashboard_url = await issue_magic_link(pro["phone"])
+        if dashboard_url:
+            link_line = f"{LINK_TEXT} {dashboard_url}"
+    except Exception as e:
+        logger.warning("dashboard link on alert skipped: %s", e)
     body = (
         f"New *{trade_v}* request near {zip_v}: {issue_v}\n"
         f"Severity: {severity_v}\n\n"
         f"Tap a button on this message, or reply *Interested {job_ref(ref)}* "
         f"or *Not available {job_ref(ref)}*."
     )
+    if link_line:
+        body = f"{body}\n\n{link_line}"
     variables = {
         "1": trade_v,
         "2": zip_v,
@@ -713,6 +733,11 @@ async def _send_job_alert(
                 await whatsapp_service.send_content_template(
                     to, content_sid=sid, content_variables=variables
                 )
+                if link_line and window_is_open(await get_last_inbound(pro["phone"])):
+                    try:
+                        await whatsapp_service.send_text_message(to, link_line)
+                    except Exception as e:
+                        logger.warning("dashboard link follow-up failed: %s", e)
                 return True
             except Exception as e:
                 logger.warning("job alert template failed, trying text: %s", e)
@@ -867,9 +892,12 @@ async def maybe_send_homeowner_options(job_id: str, force: bool = False) -> None
         rating = (pro or {}).get("rating_avg") or "—"
         fee = fee_label((pro or {}).get("dispatch_fee_tier"))
         fee_line = f"   Service call: {fee}\n" if fee else ""
+        fit = pro_fit_line(pro)
+        fit_line = f"   {fit}\n" if fit else ""
         lines.append(
             f"*{i}. {name}* (★{rating})\n"
             f"{fee_line}"
+            f"{fit_line}"
             f"   When: {r.get('availability_text')}\n"
             f"   Est: {r.get('estimate_text') or '—'}\n"
         )
@@ -905,20 +933,24 @@ async def maybe_send_homeowner_options(job_id: str, force: bool = False) -> None
                 pro = await pro_store.get(pro_phone)
                 name = (pro or {}).get("business_name") or (pro or {}).get("name") or "Pro"
                 quote_hash = phone_hash(pro_phone)
+                fit = pro_fit_line(pro)
+                estimate = str(response.get("estimate_text") or "see message")
+                if fit:
+                    estimate = f"{estimate}. {fit}"
                 await _send_choice(
                     homeowner,
                     settings.tpl_quote_choice_sid,
                     {
                         "1": clean_template_value(name, "Pro", limit=40),
                         "2": clean_template_value(response.get("availability_text"), "soon", limit=80),
-                        "3": clean_template_value(response.get("estimate_text"), "see message", limit=80),
+                        "3": clean_template_value(estimate, "see message", limit=80),
                         "4": job_id,
                         "5": quote_hash,
                     },
                     (
                         f"*{name}* for {job_ref(job_id)}\n"
                         f"When: {response.get('availability_text')}\n"
-                        f"Est: {response.get('estimate_text') or '—'}\n"
+                        f"Est: {estimate}\n"
                         "Tap Book This Pro, Pass, or Ask Question."
                     ),
                 )

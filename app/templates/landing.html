@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}HomePro Assistant — Sugar Land & Greater Houston{% endblock %}
+{% block head %}
+<style>
+  header, main, footer { padding: 28px 0; }
+  h1 { font-family: Georgia, "Iowan Old Style", serif; font-size: 34px; line-height: 1.15; font-weight: 600; margin: 10px 0 12px; }
+  .lede { color: var(--muted); font-size: 18px; }
+  .cta { margin-top: 22px; }
+  .steps { margin-top: 28px; display: grid; gap: 12px; }
+  .step { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
+  .step b { display: block; margin-bottom: 4px; }
+  .step span { color: var(--green); font-size: 13px; font-weight: 700; letter-spacing: 0.04em; }
+  footer { color: var(--muted); font-size: 14px; }
+</style>
+{% endblock %}
+{% block body %}
+<header>
+  <div class="wrap">
+    <p class="eyebrow">Sugar Land &amp; Greater Houston</p>
+    <h1>Your WhatsApp home concierge.</h1>
+    <p class="lede">Get vetted local pros without the phone tag.</p>
+    <div class="stack cta">
+      <a class="btn btn-primary" href="{{ homeowner_url }}">Chat on WhatsApp</a>
+      <a class="btn btn-secondary" href="{{ pro_url }}">Join as a Pro</a>
+    </div>
+  </div>
+</header>
+<main>
+  <div class="wrap">
+    <h2>How it works</h2>
+    <div class="steps">
+      <article class="step">
+        <span>Step 1</span>
+        <b>Describe the job on WhatsApp</b>
+        A repair, install, mount, or paint project. A photo helps the pros see what you see.
+      </article>
+      <article class="step">
+        <span>Step 2</span>
+        <b>Get quotes from local pros</b>
+        Nearby pros who cover your area reply with a time and a rough estimate.
+      </article>
+      <article class="step">
+        <span>Step 3</span>
+        <b>Book in the chat</b>
+        Pick a pro on WhatsApp. Phone numbers stay private until you do.
+      </article>
+    </div>
+  </div>
+</main>
+<footer>
+  <div class="wrap">HomePro Assistant · Agentic Holdings LLC</div>
+</footer>
+{% endblock %}

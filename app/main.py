@@ -15,6 +15,7 @@ from fastapi import BackgroundTasks, FastAPI, Form, Header, HTTPException, Reque
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.config import settings
+from app.portal_routes import router as portal_router
 from app.models import MessageContent
 from app.services.agent import process_message
 from app.services.idempotency import already_processed, mark_processed
@@ -65,6 +66,7 @@ app = FastAPI(
     version="3.0.0-pilot",
     lifespan=lifespan,
 )
+app.include_router(portal_router)
 
 
 def _webhook_url(request: Request) -> str:
@@ -93,11 +95,6 @@ def _validate_twilio_signature(request: Request, form: dict[str, Any], signature
     # Pass all POST params as strings (Twilio SDK requirement)
     params = {k: ("" if v is None else str(v)) for k, v in form.items()}
     return bool(validator.validate(url, params, signature or ""))
-
-
-@app.get("/")
-async def root():
-    return {"status": "healthy", "service": "WhatsApp Home Repair AI Agent"}
 
 
 @app.get("/health")

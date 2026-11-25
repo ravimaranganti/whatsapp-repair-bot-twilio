@@ -150,6 +150,27 @@ class JobStore:
 
         return await asyncio.to_thread(_read)
 
+    async def list_for_pro(self, phone: str) -> list[dict[str, Any]]:
+        """Jobs this pro was alerted on or booked. Pilot-scale collection scan."""
+        phone_n = normalize_phone(phone)
+
+        def _read() -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for snap in self._db().collection(self._collection).stream():
+                data = snap.to_dict() or {}
+                selected = normalize_phone(str(data.get("selected_pro_phone") or ""))
+                alerted = [
+                    normalize_phone(str(item))
+                    for item in (data.get("alerted_pro_phones") or [])
+                ]
+                if selected != phone_n and phone_n not in alerted:
+                    continue
+                data["job_id"] = snap.id
+                out.append(data)
+            return out
+
+        return await asyncio.to_thread(_read)
+
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
         def _read() -> dict[str, Any] | None:
             snap = self._db().collection(self._collection).document(job_id).get()

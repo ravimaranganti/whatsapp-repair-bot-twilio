@@ -31,6 +31,14 @@ class Settings(BaseSettings):
         default="",
         description="Public base URL of this service for Twilio RequestValidator",
     )
+    app_base_url: str = Field(
+        default="",
+        description="Public origin for pro dashboard links. Falls back to PUBLIC_BASE_URL.",
+    )
+    dashboard_session_secret: str = Field(
+        default="",
+        description="HMAC secret for the pro dashboard session cookie.",
+    )
 
     # Gemini AI credentials
     gemini_api_key: str = Field(default="", description="Google Gemini API key")
@@ -127,6 +135,18 @@ class Settings(BaseSettings):
     tpl_pro_fee_sid: str = Field(
         default="",
         description="In-session service-call fee buttons. No WhatsApp approval.",
+    )
+    tpl_pro_trades_extra_sid: str = Field(
+        default="",
+        description="In-session button for mobile auto repair. The main trade list is full.",
+    )
+    tpl_pro_language_sid: str = Field(
+        default="",
+        description="In-session English / Spanish / Both buttons. No WhatsApp approval.",
+    )
+    tpl_pro_insured_sid: str = Field(
+        default="",
+        description="In-session insured yes/no for plumbing, electrical, and HVAC.",
     )
     tpl_quote_choice_sid: str = Field(
         default="",

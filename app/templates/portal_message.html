@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}HomePro Assistant{% endblock %}
+{% block body %}
+<main style="padding: 48px 0;">
+  <div class="wrap stack">
+    <p class="eyebrow">HomePro Assistant</p>
+    <h1 style="font-family: Georgia, serif; font-size: 28px; font-weight: 600;">Dashboard</h1>
+    <p>{{ text }}</p>
+    <a class="btn btn-primary" href="{{ whatsapp_url }}">Open WhatsApp</a>
+    <a class="btn btn-quiet" href="/">Back to home</a>
+  </div>
+</main>
+{% endblock %}

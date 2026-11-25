@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}HomePro Assistant{% endblock %}</title>
+  <style>
+    :root {
+      --ink: #1c1915;
+      --muted: #5c564c;
+      --line: #e4dccf;
+      --paper: #f6f1e8;
+      --card: #fffdf9;
+      --green: #1d6b45;
+      --green-dark: #145233;
+      --amber: #8a5a12;
+      --amber-bg: #f8ecd4;
+      --red: #8d3a32;
+      --red-bg: #f8e4e1;
+      --gray-bg: #eeeae3;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: "Segoe UI", system-ui, sans-serif;
+      font-size: 16.5px;
+      line-height: 1.45;
+    }
+    a { color: var(--green-dark); }
+    .wrap { width: min(440px, calc(100% - 32px)); margin: 0 auto; }
+    h1, h2, p { margin: 0; }
+    .eyebrow {
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--green);
+    }
+    .btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 52px;
+      padding: 12px 16px;
+      border-radius: 14px;
+      text-decoration: none;
+      font-weight: 700;
+      border: 2px solid transparent;
+    }
+    .btn-primary { background: var(--green); color: white; }
+    .btn-secondary { background: transparent; color: var(--green-dark); border-color: var(--green); }
+    .btn-quiet { background: white; color: var(--ink); border-color: var(--line); }
+    button.btn { width: 100%; font: inherit; cursor: pointer; }
+    .stack { display: grid; gap: 10px; }
+  </style>
+  {% block head %}{% endblock %}
+</head>
+<body>
+  {% block body %}{% endblock %}
+</body>
+</html>

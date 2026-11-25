@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+{% block title %}Your jobs · HomePro Assistant{% endblock %}
+{% block head %}
+<meta name="robots" content="noindex">
+<style>
+  .top { padding: 20px 0 8px; display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; }
+  .top h1 { font-family: Georgia, serif; font-size: 26px; font-weight: 600; }
+  .logout { font-size: 14px; }
+  .notice { background: #e5f3eb; border-radius: 12px; padding: 12px 14px; margin: 8px 0 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px; display: grid; gap: 8px; }
+  .card h2 { font-size: 18px; }
+  .meta { color: var(--muted); font-size: 14px; }
+  .badge { display: inline-block; border-radius: 999px; padding: 3px 8px; font-size: 12px; font-weight: 700; background: var(--gray-bg); }
+  .badge.completed { background: #e5f3eb; color: var(--green-dark); }
+  .badge.pending { background: var(--amber-bg); color: var(--amber); }
+  .badge.declined { background: var(--red-bg); color: var(--red); }
+  label { display: grid; gap: 4px; font-size: 14px; font-weight: 650; }
+  input[type="text"], select {
+    width: 100%; min-height: 48px; border: 1px solid var(--line); border-radius: 12px;
+    padding: 10px 12px; font: inherit; background: white;
+  }
+  .check { display: flex; gap: 10px; align-items: flex-start; font-weight: 600; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .check input { width: 20px; height: 20px; margin-top: 2px; }
+  .check small { display: block; font-weight: 500; color: var(--muted); }
+  .switch { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 0 14px; }
+  .page { padding-bottom: 92px; }
+  nav.tabs {
+    position: fixed; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: repeat(3, 1fr);
+    background: #fffdf9; border-top: 1px solid var(--line); padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+  }
+  nav.tabs a { text-align: center; text-decoration: none; color: var(--muted); font-size: 13px; font-weight: 700; padding: 10px 4px; border-radius: 12px; }
+  nav.tabs a.on { background: #e5f3eb; color: var(--green-dark); }
+  h2.section { margin: 16px 0 10px; font-size: 15px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+</style>
+{% endblock %}
+{% block body %}
+<div class="wrap page">
+  <div class="top">
+    <div>
+      <p class="eyebrow">HomePro Assistant</p>
+      <h1>{{ business }}</h1>
+    </div>
+    <a class="logout" href="/pro/logout">Log out</a>
+  </div>
+  {% if notice %}<p class="notice">{{ notice }}</p>{% endif %}
+
+  {% if tab == "jobs" %}
+    <h2 class="section">Booked</h2>
+    <div class="stack">
+      {% for job in booked %}
+      <article class="card">
+        <h2>{{ job.ref }} · {{ job.trade }}</h2>
+        <p>{{ job.place }}</p>
+        {% if job.issue %}<p class="meta">{{ job.issue }}</p>{% endif %}
+        <p class="meta">{{ job.homeowner_name }} · {{ job.homeowner_phone }}</p>
+        <p class="meta">When: {{ job.when or "To be arranged" }}</p>
+        <p class="meta">Quote: {{ job.estimate or "—" }}</p>
+        {% if job.access_notes %}
+          <p class="meta">Access: {{ job.access_notes | join("; ") }}</p>
+        {% endif %}
+        <form method="post" action="/pro/dashboard/jobs/{{ job.job_id }}/complete">
+          <button class="btn btn-primary" type="submit">Mark completed</button>
+        </form>
+      </article>
+      {% else %}
+      <p class="meta">No booked jobs right now.</p>
+      {% endfor %}
+    </div>
+
+    <h2 class="section">Open alerts</h2>
+    <div class="stack">
+      {% for job in open_alerts %}
+      <article class="card">
+        <h2>{{ job.ref }} · {{ job.trade }}</h2>
+        <p>{{ job.place }}</p>
+        {% if job.issue %}<p class="meta">{{ job.issue }}</p>{% endif %}
+        <form class="stack" method="post" action="/pro/dashboard/jobs/{{ job.job_id }}/quote">
+          <label>When can you come?
+            <input type="text" name="availability" maxlength="200" required placeholder="Tomorrow morning">
+          </label>
+          <label>Rough estimate
+            <input type="text" name="estimate" maxlength="200" required placeholder="$150">
+          </label>
+          <button class="btn btn-primary" type="submit">{% if job.needs_quote %}Send quote{% else %}Accept / Quote{% endif %}</button>
+        </form>
+        <form method="post" action="/pro/dashboard/jobs/{{ job.job_id }}/pass">
+          <button class="btn btn-quiet" type="submit">Pass</button>
+        </form>
+        <a href="{{ whatsapp_url }}">Answer in WhatsApp</a>
+      </article>
+      {% else %}
+      <p class="meta">No alerts waiting on you.</p>
+      {% endfor %}
+    </div>
+  {% elif tab == "history" %}
+    <h2 class="section">History</h2>
+    <div class="stack">
+      {% for job in history %}
+      <article class="card">
+        <h2>{{ job.ref }} · {{ job.trade }}</h2>
+        <p>
+          {% if job.badge == "Completed" %}<span class="badge completed">Completed</span>
+          {% elif job.badge == "Quoted - Pending" %}<span class="badge pending">Quoted - Pending</span>
+          {% elif job.badge == "Not Selected" %}<span class="badge">Not Selected</span>
+          {% else %}<span class="badge declined">Declined</span>{% endif %}
+          <span class="meta">{{ job.date }}</span>
+        </p>
+        <p class="meta">{{ job.place }}{% if job.estimate %} · {{ job.estimate }}{% endif %}</p>
+        {% if job.show_contact %}<p class="meta">{{ job.homeowner_name }} · {{ job.homeowner_phone }}</p>{% endif %}
+      </article>
+      {% else %}
+      <p class="meta">Completed jobs and past quotes will show up here.</p>
+      {% endfor %}
+    </div>
+  {% else %}
+    <h2 class="section">Availability</h2>
+    <form class="card" method="post" action="/pro/dashboard/profile">
+      <div class="switch">
+        <div>
+          <b>Same-day / urgent calls</b>
+          <div class="meta">Emergency jobs only go to pros who turn this on.</div>
+        </div>
+        <input type="checkbox" name="accepts_emergency" value="1" {% if emergency %}checked{% endif %} aria-label="Accept same-day or urgent calls">
+      </div>
+      <label>Standard lead time
+        <select name="standard_lead_time" required>
+          <option value="" disabled {% if not lead %}selected{% endif %}>Choose one</option>
+          {% for choice in lead_choices %}
+          <option value="{{ choice.key }}" {% if lead == choice.key %}selected{% endif %}>{{ choice.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Service call / diagnostic fee
+        <select name="dispatch_fee_tier" required>
+          <option value="" disabled {% if not fee %}selected{% endif %}>Choose one</option>
+          {% for choice in fee_choices %}
+          <option value="{{ choice.key }}" {% if fee == choice.key %}selected{% endif %}>{{ choice.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <div>
+        <b>Languages you speak with customers</b>
+        <label class="check">
+          <input type="checkbox" name="languages" value="en" {% if "en" in languages|default([]) %}checked{% endif %}>
+          <span>English</span>
+        </label>
+        <label class="check">
+          <input type="checkbox" name="languages" value="es" {% if "es" in languages|default([]) %}checked{% endif %}>
+          <span>Spanish</span>
+        </label>
+      </div>
+      {% if show_insured %}
+      <label>Insurance for plumbing, electrical, or HVAC
+        <select name="insured">
+          <option value="" {% if insured is not sameas true and insured is not sameas false %}selected{% endif %}>Choose one</option>
+          <option value="yes" {% if insured is sameas true %}selected{% endif %}>Yes, insured</option>
+          <option value="no" {% if insured is sameas false %}selected{% endif %}>Not insured</option>
+        </select>
+      </label>
+      {% endif %}
+      <label>Anything else that helps us send better leads
+        <input type="text" name="profile_notes" maxlength="500" value="{{ profile_notes|default('') }}" placeholder="12 years, tankless water heaters, bilingual crew">
+      </label>
+      <div>
+        <b>Greater Houston areas</b>
+        {% for area in areas %}
+        <label class="check">
+          <input type="checkbox" name="service_areas" value="{{ area.key }}" {% if area.checked %}checked{% endif %}>
+          <span>{{ area.label }}<small>{{ area.note }}</small></span>
+        </label>
+        {% endfor %}
+      </div>
+      <button class="btn btn-primary" type="submit">Save settings</button>
+    </form>
+  {% endif %}
+</div>
+<nav class="tabs">
+  <a href="/pro/dashboard?tab=jobs" {% if tab == "jobs" %}class="on"{% endif %}>Jobs</a>
+  <a href="/pro/dashboard?tab=history" {% if tab == "history" %}class="on"{% endif %}>History</a>
+  <a href="/pro/dashboard?tab=profile" {% if tab == "profile" %}class="on"{% endif %}>Profile</a>
+</nav>
+{% endblock %}

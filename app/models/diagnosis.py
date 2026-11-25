@@ -18,6 +18,7 @@ class Trade(str, Enum):
     general_contractor = "general_contractor"
     pool = "pool"
     lawn = "lawn"
+    mobile_auto = "mobile_auto"
     other = "other"
     not_home_issue = "not_home_issue"
 
@@ -106,6 +107,7 @@ TRADE_TO_PRO_CATEGORY = {
     Trade.general_contractor: "general_contractor",
     Trade.pool: "pool",
     Trade.lawn: "lawn",
+    Trade.mobile_auto: "mobile_auto",
     Trade.other: "handyman",
     Trade.not_home_issue: "handyman",
 }

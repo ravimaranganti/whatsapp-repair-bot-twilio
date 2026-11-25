@@ -64,7 +64,14 @@ async def process_message(message: MessageContent, sender: str):
         body_u = (message.body or "").strip().upper()
         from app.services.onboarding import join_code_ok
 
-        if not _on_allowlist(phone) and not join_code_ok(message.body or ""):
+        from app.services.portal_commands import is_dashboard_command, is_pro_signup
+
+        if (
+            not _on_allowlist(phone)
+            and not join_code_ok(message.body or "")
+            and not is_pro_signup(message.body or "")
+            and not is_dashboard_command(message.body or "")
+        ):
             await whatsapp_service.send_text_message(phone, PILOT_DENY_MSG)
             return
 
@@ -295,10 +302,10 @@ async def handle_image_message(message: MessageContent, sender: str):
             parts.append(diagnosis.follow_up_question)
         homeowner_msg = "\n\n".join(p for p in parts if p)
 
-        # Pro brief for repair team (no phone dump when dispatch enabled)
+        # Same brief the pro will receive, so the homeowner can see it before we ask anyone.
         pb = diagnosis.pro_brief
         pro_lines = [
-            "*For a pro:*",
+            "*Here's what I'll tell a pro:*",
             f"*Issue:* {pb.issue}",
             f"*Likely cause:* {pb.likely_cause}",
             f"*Severity:* {diagnosis.severity.value}",
@@ -312,35 +319,6 @@ async def handle_image_message(message: MessageContent, sender: str):
             pro_lines.append(
                 "*Safety:* " + ", ".join(f.value for f in diagnosis.safety_flags)
             )
-
-        if not settings.dispatch_enabled:
-            # Legacy-style: append static directory recommendations (no phones in chat tools path)
-            from app.services.professional_matcher import (
-                format_professional_recommendations,
-                recommend_professionals,
-            )
-
-            cat_map = {
-                "plumbing": "plumbers",
-                "hvac": "hvac",
-                "electrical": "electricians",
-                "handyman": "handyman",
-                "appliance": "handyman",
-            }
-            cat = cat_map.get(diagnosis.trade.value, "handyman")
-            sev_map = {
-                "low": "Low",
-                "medium": "Medium",
-                "high": "High",
-                "emergency": "High",
-            }
-            recs, urgency = recommend_professionals(
-                cat, sev_map.get(diagnosis.severity.value, "Medium"), 3
-            )
-            # Soften WhatsApp formatting in legacy formatter output
-            section = format_professional_recommendations(recs, urgency)
-            section = section.replace("**", "*")
-            pro_lines.append(section)
 
         await whatsapp_service.send_text_message(sender, homeowner_msg[:1550])
         if diagnosis.trade.value != "not_home_issue":
@@ -360,14 +338,9 @@ async def handle_image_message(message: MessageContent, sender: str):
             ],
         )
 
-        # Phase 4 path (DIY follow-up or consent) when flag on
-        if settings.dispatch_enabled and diagnosis.trade.value != "not_home_issue":
+        if diagnosis.trade.value != "not_home_issue":
             from app.services.dispatch import after_diagnosis
 
-            # If DIY, after_diagnosis sends DIY steps; avoid duplicate homeowner_msg DIY
-            # We already sent homeowner_msg — after_diagnosis may re-send with steps.
-            # For DIY, skip duplicate: only call after_diagnosis which includes message.
-            # Simpler: if diy, we already sent message without steps — let after_diagnosis add steps.
             await after_diagnosis(
                 phone=sender,
                 diagnosis=diagnosis,

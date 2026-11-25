@@ -57,6 +57,20 @@ def test_expanded_trades_from_taps_and_text():
     assert gc.trades == ["general_contractor"]
 
 
+def test_mobile_auto_repair_from_tap_or_text():
+    tapped = interpret_trade_turn("Mobile auto repair", "trade:mobile_auto", "choose", [])
+    assert tapped.action == "add"
+    assert tapped.trades == ["mobile_auto"]
+    typed = interpret_trade_turn("I'm a mobile mechanic", "", "choose", [])
+    assert typed.trades == ["mobile_auto"]
+
+
+def test_language_and_insurance_taps_stay_on_setup():
+    assert is_onboarding_tap("lang_both", "Both", interactive=True)
+    assert is_onboarding_tap("insured_yes", "Yes, insured", interactive=True)
+    assert not is_onboarding_tap("", "both of the sinks", interactive=False)
+
+
 def test_blank_or_ok_is_not_a_trade():
     assert interpret_trade_turn("", "", "choose", []).action == "invalid"
     assert interpret_trade_turn("ok", "", "choose", []).action == "invalid"

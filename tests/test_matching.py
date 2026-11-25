@@ -15,6 +15,21 @@ def _pro(name, avail, rate, rating, phone="1"):
     }
 
 
+def test_insured_plumber_ranks_ahead_and_notes_break_ties():
+    uninsured = {**_pro("Uninsured", "Same day", "$80", 5.0, "1"), "insured": False}
+    insured = {**_pro("Insured", "Same day", "$80", 4.0, "2"), "insured": True}
+    ranked = rank_pros([uninsured, insured], "medium", trade="plumbing")
+    assert ranked[0]["name"] == "Insured"
+
+    noted = {
+        **_pro("Noted", "Same day", "$80", 4.0, "1"),
+        "profile_notes": "tankless water heaters",
+    }
+    plain = {**_pro("Plain", "Same day", "$80", 4.0, "2"), "profile_notes": ""}
+    tied = rank_pros([plain, noted], "medium", trade="painting", issue="tankless heater")
+    assert tied[0]["name"] == "Noted"
+
+
 def test_high_severity_prefers_fast():
     pros = [
         _pro("Slow", "Within a week", "$50-60/hr", 5.0, "1"),

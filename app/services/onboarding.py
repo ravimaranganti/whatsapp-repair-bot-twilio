@@ -19,6 +19,13 @@ from app.services.pro_capacity import (
     interpret_lead_time,
     lead_label,
 )
+from app.services.pro_profile import (
+    clean_profile_note,
+    interpret_insured,
+    interpret_languages,
+    language_label,
+    needs_insurance_question,
+)
 from app.services.pros import pro_store
 from app.services.service_areas import (
     AREA_ALL,
@@ -44,6 +51,7 @@ TRADE_CHOICES: list[tuple[str, str]] = [
     ("general_contractor", "General contractor"),
     ("pool", "Pool"),
     ("lawn", "Lawn & garden"),
+    ("mobile_auto", "Mobile auto repair"),
 ]
 TRADE_MAP = {key: key for key, _label in TRADE_CHOICES}
 TRADE_OTHER = "trade:other"
@@ -62,6 +70,11 @@ _ONBOARDING_IDS = frozenset(
         "fee_free",
         "fee_50_99",
         "fee_100_plus",
+        "lang_en",
+        "lang_es",
+        "lang_both",
+        "insured_yes",
+        "insured_no",
     }
 )
 _ONBOARDING_TITLES = frozenset(
@@ -78,6 +91,12 @@ _ONBOARDING_TITLES = frozenset(
         "free estimate",
         "$50 - $99 fee",
         "$100+ fee",
+        "english",
+        "spanish",
+        "both",
+        "yes, insured",
+        "not insured",
+        "mobile auto repair",
     }
 )
 
@@ -108,6 +127,13 @@ _TRADE_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "pool": ("pool", "pools", "pool service"),
     "lawn": ("lawn", "lawn care", "landscaping", "mowing"),
+    "mobile_auto": (
+        "mobile auto repair",
+        "mobile auto",
+        "auto repair",
+        "mobile mechanic",
+        "mechanic",
+    ),
 }
 _DONE_WORDS = frozenset(
     {
@@ -167,6 +193,8 @@ def normalize_custom_trade(text: str) -> str | None:
     if not cleaned or cleaned in _NOT_A_TRADE:
         return None
     if len(cleaned) < 2 or len(cleaned) > 40:
+        return None
+    if not any(len(word) > 2 for word in cleaned.split()):
         return None
     if not re.search(r"[a-z]", cleaned):
         return None
@@ -245,21 +273,25 @@ def interpret_trade_turn(
 async def _send_trade_picker(phone: str) -> None:
     """In-session list of trades. Falls back to text if the Content SID is missing."""
     sid = (settings.tpl_pro_trades_sid or "").strip()
+    sent_list = False
     if sid:
         try:
             await whatsapp_service.send_content_template(phone, content_sid=sid)
-            return
+            sent_list = True
         except Exception as e:
             logger.warning("pro trades list failed: %s", e)
-    lines = "\n".join(f"- {label}" for _key, label in TRADE_CHOICES)
-    await whatsapp_service.send_text_message(
-        phone,
-        "*Step 2/7:* Pick a trade. You can add more than one.\n\n"
-        f"{lines}\n"
-        "- Other\n\n"
-        "Reply with a trade, or type your own, like roofing. "
-        "After each one you can add another.",
-    )
+    if not sent_list:
+        lines = "\n".join(f"- {label}" for _key, label in TRADE_CHOICES)
+        await whatsapp_service.send_text_message(
+            phone,
+            "*Step 2:* Pick a trade. You can add more than one.\n\n"
+            f"{lines}\n"
+            "- Other\n\n"
+            "Reply with a trade, or type your own, like roofing or mobile auto repair. "
+            "After each one you can add another.",
+        )
+        return
+    await _send_mobile_auto_prompt(phone)
 
 
 async def _send_trade_more(phone: str, selected: list[str]) -> None:
@@ -279,6 +311,21 @@ async def _send_trade_more(phone: str, selected: list[str]) -> None:
         phone,
         f"Added: {summary}. You can pick more than one.\n\n"
         "Add another trade? Reply *Yes* or *That's all*.",
+    )
+
+
+async def _send_mobile_auto_prompt(phone: str) -> None:
+    """The main trade list is full, so this trade rides a second in-session button."""
+    sid = (settings.tpl_pro_trades_extra_sid or "").strip()
+    if sid:
+        try:
+            await whatsapp_service.send_content_template(phone, content_sid=sid)
+            return
+        except Exception as e:
+            logger.warning("mobile auto trade prompt failed: %s", e)
+    await whatsapp_service.send_text_message(
+        phone,
+        "Also available: reply *Mobile auto repair* if you come to the vehicle.",
     )
 
 
@@ -370,6 +417,61 @@ async def _send_fee_prompt(phone: str) -> None:
         phone,
         "*Step 6/7:* What is your typical service call / diagnostic fee to come out and assess a job?\n\n"
         "Reply *Free estimate*, *$50 – $99*, or *$100+*.",
+    )
+
+
+def _step_total(draft: dict[str, Any]) -> int:
+    return 10 if needs_insurance_question(draft.get("trades") or []) else 9
+
+
+async def _send_language_prompt(phone: str, draft: dict[str, Any]) -> None:
+    total = _step_total(draft)
+    sid = (settings.tpl_pro_language_sid or "").strip()
+    if sid:
+        try:
+            await whatsapp_service.send_content_template(phone, content_sid=sid)
+            return
+        except Exception as e:
+            logger.warning("pro language prompt failed: %s", e)
+    await whatsapp_service.send_text_message(
+        phone,
+        f"*Step 7 of {total}:* Which languages do you speak with customers?\n\n"
+        "Reply *English*, *Spanish*, or *Both*.",
+    )
+
+
+async def _send_insured_prompt(phone: str) -> None:
+    sid = (settings.tpl_pro_insured_sid or "").strip()
+    if sid:
+        try:
+            await whatsapp_service.send_content_template(phone, content_sid=sid)
+            return
+        except Exception as e:
+            logger.warning("pro insured prompt failed: %s", e)
+    await whatsapp_service.send_text_message(
+        phone,
+        "*Step 8 of 10:* Are you insured for the plumbing, electrical, or HVAC work you do?\n\n"
+        "Reply *Yes, insured* or *Not insured*.",
+    )
+
+
+async def _send_notes_prompt(phone: str, draft: dict[str, Any]) -> None:
+    total = _step_total(draft)
+    step = 9 if needs_insurance_question(draft.get("trades") or []) else 8
+    await whatsapp_service.send_text_message(
+        phone,
+        f"*Step {step} of {total}:* Anything else homeowners should know? "
+        "Years of experience, specialties, brands you work on — a sentence or two.\n\n"
+        "This helps us send you better leads. Reply with that note, or *Skip*.",
+    )
+
+
+async def _send_opt_in_prompt(phone: str, draft: dict[str, Any]) -> None:
+    total = _step_total(draft)
+    await whatsapp_service.send_text_message(
+        phone,
+        f"*Step {total} of {total}:* You'll receive job alerts on WhatsApp. Reply STOP anytime.\n"
+        "Reply *Yes* to opt in, or *No* to cancel.",
     )
 
 
@@ -484,6 +586,9 @@ async def handle_pro_command(phone: str, body: str) -> bool:
             f"Urgent calls: {'yes' if pro.get('accepts_emergency') else 'no' if 'accepts_emergency' in pro else '—'}\n"
             f"Lead time: {lead_label(pro.get('standard_lead_time')) or pro.get('availability_text') or '—'}\n"
             f"Service call: {fee_label(pro.get('dispatch_fee_tier')) or pro.get('rate_text') or '—'}\n"
+            f"Languages: {language_label(pro.get('languages')) or '—'}\n"
+            f"Insured: {'yes' if pro.get('insured') is True else 'no' if pro.get('insured') is False else '—'}\n"
+            f"About: {pro.get('profile_notes') or '—'}\n"
             f"Opted in: {'yes' if pro.get('opted_in') else 'no'}\n"
             f"Status: {pro.get('status') or '—'}"
         )
@@ -663,14 +768,58 @@ async def continue_onboarding(
         draft["rate_text"] = fee_label(fee)
         ctx.update({"step": 7, "draft": draft})
         await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
-        await whatsapp_service.send_text_message(
-            phone_n,
-            "*Step 7/7:* You'll receive job alerts on WhatsApp. Reply STOP anytime.\n"
-            "Reply *Yes* to opt in, or *No* to cancel.",
-        )
+        await _send_language_prompt(phone_n, draft)
         return True
 
     if step == 7:
+        languages = interpret_languages(text, payload)
+        if not languages:
+            await whatsapp_service.send_text_message(
+                phone_n, "Tap *English*, *Spanish*, or *Both*."
+            )
+            await _send_language_prompt(phone_n, draft)
+            return True
+        draft["languages"] = languages
+        if needs_insurance_question(draft.get("trades") or []):
+            ctx.update({"step": 8, "draft": draft})
+            await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
+            await _send_insured_prompt(phone_n)
+        else:
+            draft["insured"] = None
+            ctx.update({"step": 9, "draft": draft})
+            await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
+            await _send_notes_prompt(phone_n, draft)
+        return True
+
+    if step == 8:
+        insured = interpret_insured(text, payload)
+        if insured is None:
+            await whatsapp_service.send_text_message(
+                phone_n, "Tap *Yes, insured* or *Not insured*."
+            )
+            await _send_insured_prompt(phone_n)
+            return True
+        draft["insured"] = insured
+        ctx.update({"step": 9, "draft": draft})
+        await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
+        await _send_notes_prompt(phone_n, draft)
+        return True
+
+    if step == 9:
+        note = clean_profile_note(text)
+        if note is None:
+            await whatsapp_service.send_text_message(
+                phone_n, "Send a short note, or reply *Skip*."
+            )
+            await _send_notes_prompt(phone_n, draft)
+            return True
+        draft["profile_notes"] = note
+        ctx.update({"step": 10, "draft": draft})
+        await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
+        await _send_opt_in_prompt(phone_n, draft)
+        return True
+
+    if step == 10:
         if text.lower() in {"yes", "y", "yeah", "sure"}:
             from datetime import datetime, timezone
 
@@ -686,6 +835,9 @@ async def continue_onboarding(
                 availability_text=draft.get("availability_text"),
                 dispatch_fee_tier=draft.get("dispatch_fee_tier"),
                 rate_text=draft.get("rate_text"),
+                languages=draft.get("languages") or [],
+                insured=draft.get("insured"),
+                profile_notes=draft.get("profile_notes") or "",
                 opted_in=True,
                 opted_in_at=datetime.now(timezone.utc).isoformat(),
                 status="active",
@@ -699,7 +851,10 @@ async def continue_onboarding(
                 f"*{draft.get('business_name') or draft.get('name')}*\n"
                 f"Trades: {trades}\nAreas: {areas}\n"
                 f"{capacity_summary(draft.get('accepts_emergency'), draft.get('standard_lead_time'))}\n"
-                f"Service call: {fee_label(draft.get('dispatch_fee_tier')) or '—'}\n\n"
+                f"Service call: {fee_label(draft.get('dispatch_fee_tier')) or '—'}\n"
+                f"Languages: {language_label(draft.get('languages')) or '—'}\n"
+                f"Insured: {'yes' if draft.get('insured') is True else 'no' if draft.get('insured') is False else '—'}\n"
+                f"About: {draft.get('profile_notes') or '—'}\n\n"
                 "We'll message you when a matching job comes in.",
             )
             await log_event(
