@@ -161,7 +161,9 @@ _ACTIVATED = (
     "You're in! We'll message you when a matching job comes in.\n\n"
     "Reply DASHBOARD for your jobs and to update areas, timing, fee, photo estimates, "
     "language, insurance, or your note. Reply JOIN again to change your name, business, "
-    "or trades. Reply HELP anytime."
+    "or trades. Reply HELP anytime.\n\n"
+    "💡 Pro Tip: Tap HomePro Assistant at the top of this chat → Notifications / Sound "
+    "to set a custom alert tone and Pin this chat so you never miss a local job lead!"
 )
 
 
