@@ -19,6 +19,10 @@ def test_quote_buttons_carry_job_and_quote():
     assert parse_homeowner_payload("close_job:job123").action == "close_job"
     assert parse_homeowner_payload("retry_pros:job123").action == "retry_pros"
     assert parse_homeowner_payload("reply_pro_q:job123:hash456").action == "reply_pro_q"
+    done = parse_homeowner_payload("job_outcome:job123:COMPLETED")
+    assert done.action == "job_outcome" and done.outcome == "COMPLETED"
+    assert parse_homeowner_payload("job_outcome:job123:SCHEDULED").outcome == "SCHEDULED"
+    assert parse_homeowner_payload("reopen_job:job123").action == "reopen_job"
     assert ask.action == "ask_quote"
 
 

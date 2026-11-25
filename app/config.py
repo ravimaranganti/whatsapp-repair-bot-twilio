@@ -202,6 +202,14 @@ class Settings(BaseSettings):
         default="",
         description="In-session reminder for a quote the homeowner has not booked or passed.",
     )
+    post_job_checkin_content_sid: str = Field(
+        default="",
+        description="Utility template for the 48-hour how-did-it-go check-in. Needs WhatsApp approval.",
+    )
+    tpl_job_rescue_sid: str = Field(
+        default="",
+        description="In-session Find Another Pro / Close Request after a booked job falls through.",
+    )
     operator_phone: str = Field(
         default="",
         description="E.164 phone that receives the weekly digest",

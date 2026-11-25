@@ -123,7 +123,14 @@ async def run_homeowner_followups(now: datetime | None = None) -> dict[str, int]
         if due and await _send_quote_reminder(job, due):
             await job_store.update_fields(job_id, quote_reminder_sent=True)
             reminders += 1
-    return {"processedNoReply": no_reply, "processedQuoteReminders": reminders}
+    from app.services.job_checkin import run_post_job_checkins
+
+    checkins = await run_post_job_checkins(current)
+    return {
+        "processedNoReply": no_reply,
+        "processedQuoteReminders": reminders,
+        "processedCheckins": checkins,
+    }
 
 
 async def _send_no_reply(job: dict[str, Any]) -> bool:

@@ -185,6 +185,20 @@ class ProStore:
         new_avg = ((avg * count) + rating) / new_count
         await self.upsert(phone, rating_avg=round(new_avg, 2), rating_count=new_count)
 
+    async def record_completed_job(self, phone: str, rating: int | None) -> None:
+        """Count a finished job, and fold in a 1–5 rating when the homeowner gave one."""
+        pro = await self.get(phone) or await self.upsert(phone)
+        if rating is not None:
+            await self.apply_rating(phone, rating)
+            pro = await self.get(phone) or pro
+        completed = int(pro.get("completed_jobs_count") or 0) + 1
+        average = float(pro.get("rating_avg") or 0.0)
+        await self.upsert(
+            phone,
+            completed_jobs_count=completed,
+            average_rating=round(average, 2),
+        )
+
 
 pro_store = ProStore()
 

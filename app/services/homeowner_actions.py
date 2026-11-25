@@ -16,6 +16,7 @@ class HomeownerTap:
     action: str
     job_id: str = ""
     quote_id: str = ""
+    outcome: str = ""
 
 
 def parse_homeowner_payload(payload: str) -> HomeownerTap | None:
@@ -38,6 +39,12 @@ def parse_homeowner_payload(payload: str) -> HomeownerTap | None:
         return HomeownerTap("book_quote", rest[0], rest[1])
     if action == "reply_pro_q" and len(rest) >= 2:
         return HomeownerTap("reply_pro_q", rest[0], rest[1])
+    if action == "job_outcome" and len(rest) >= 2:
+        outcome = rest[1].strip().upper()
+        if outcome in {"COMPLETED", "SCHEDULED", "FELL_THROUGH"}:
+            return HomeownerTap("job_outcome", rest[0], outcome=outcome)
+    if action == "reopen_job" and rest and rest[0]:
+        return HomeownerTap("reopen_job", rest[0])
     if action in {"book_quote", "ask_quote", "pass_quote", "decline_quote"} and len(rest) >= 2:
         name = "pass_quote" if action in {"pass_quote", "decline_quote"} else action
         return HomeownerTap(name, rest[0], rest[1])

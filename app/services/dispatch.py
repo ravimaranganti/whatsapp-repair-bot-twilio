@@ -250,6 +250,14 @@ async def _apply_homeowner_tap(
         await _already_updated(phone, tap.job_id)
         return True
 
+    if tap.action == "job_outcome":
+        await _apply_job_outcome(phone, job, tap.outcome)
+        return True
+
+    if tap.action == "reopen_job":
+        await _reopen_fell_through(phone, job)
+        return True
+
     if tap.action == "confirm_job":
         if job.get("state") != "awaiting_consent":
             await _already_updated(phone, tap.job_id)
@@ -289,6 +297,9 @@ async def _apply_homeowner_tap(
         return True
 
     if tap.action in {"keep_looking", "close_job", "retry_pros"}:
+        if tap.action == "close_job" and job.get("state") == "assigned":
+            await _close_homeowner_job(phone, job)
+            return True
         if job.get("state") not in {"dispatched", "awaiting_pick"}:
             await _already_updated(phone, tap.job_id)
             return True
@@ -477,6 +488,31 @@ async def _relay_quote_question(phone: str, text: str, ctx: dict[str, Any]) -> N
 async def handle_homeowner_typed(phone: str, body: str) -> bool:
     """Book / Yes / Pass with no locked button. Do not guess among several quotes."""
     phrase = " ".join((body or "").lower().split())
+    if phrase in {"job completed", "still scheduled", "didn't work out", "didnt work out"}:
+        phone_n = normalize_phone(phone)
+        jobs = await job_store.list_for_homeowner(phone_n, {"assigned"})
+        waiting = [job for job in jobs if job.get("outcome_status") == "PENDING_CHECKIN"]
+        if len(waiting) != 1:
+            return False
+        outcome = {
+            "job completed": "COMPLETED",
+            "still scheduled": "SCHEDULED",
+            "didn't work out": "FELL_THROUGH",
+            "didnt work out": "FELL_THROUGH",
+        }[phrase]
+        await _apply_job_outcome(phone_n, waiting[0], outcome)
+        return True
+    if phrase in {"find another pro", "close request"}:
+        phone_n = normalize_phone(phone)
+        jobs = await job_store.list_for_homeowner(phone_n, {"assigned"})
+        fallen = [job for job in jobs if job.get("outcome_status") == "FELL_THROUGH"]
+        if len(fallen) != 1:
+            return False
+        if phrase == "find another pro":
+            await _reopen_fell_through(phone_n, fallen[0])
+        else:
+            await _close_homeowner_job(phone_n, fallen[0])
+        return True
     if phrase in {"keep looking", "ask again", "leave it", "cancel request"}:
         phone_n = normalize_phone(phone)
         jobs = await job_store.list_for_homeowner(phone_n, {"dispatched", "awaiting_pick"})
@@ -562,6 +598,10 @@ async def handle_homeowner_state(
     payload = (interaction_payload or "").strip()
     tap = parse_homeowner_payload(payload)
     if tap and await _apply_homeowner_tap(phone_n, tap, ctx):
+        return True
+
+    if mode == "awaiting_job_feedback":
+        await _capture_job_feedback(phone_n, text, ctx)
         return True
 
     if mode == MODE_AWAITING_QUOTE_QUESTION:
@@ -1184,10 +1224,12 @@ async def _after_pass(phone: str, job: dict[str, Any], pro_phone: str) -> None:
 
 async def _close_homeowner_job(phone: str, job: dict[str, Any]) -> None:
     job_id = str(job.get("job_id") or "")
-    if job.get("state") not in {"dispatched", "awaiting_pick", "awaiting_consent"}:
+    if job.get("state") not in {"dispatched", "awaiting_pick", "awaiting_consent", "assigned"}:
         await _already_updated(phone, job_id)
         return
     await job_store.set_state(job_id, "cancelled")
+    if job.get("state") == "assigned":
+        await job_store.update_fields(job_id, outcome_status="CLOSED")
     ho = await homeowner_store.get(phone)
     if (ho or {}).get("active_job_id") == job_id:
         await homeowner_store.update(phone, active_job_id=None)
@@ -1276,6 +1318,145 @@ async def send_quote_reminder(job: dict[str, Any], response: dict[str, Any]) -> 
             "6": quote_hash,
         },
         body + "\n\nTap Book This Pro, Pass, or Ask Question.",
+    )
+
+
+async def _apply_job_outcome(phone: str, job: dict[str, Any], outcome: str) -> None:
+    """Homeowner tapped Job Completed, Still Scheduled, or Didn't Work Out."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.services.job_checkin import (
+        COMPLETED,
+        MODE_AWAITING_JOB_FEEDBACK,
+        PENDING,
+        SCHEDULED,
+    )
+
+    job_id = str(job.get("job_id") or "")
+    if job.get("state") != "assigned" or job.get("outcome_status") != PENDING:
+        await _already_updated(phone, job_id)
+        return
+    pro = await pro_store.get(str(job.get("selected_pro_phone") or ""))
+    name = (pro or {}).get("business_name") or (pro or {}).get("name") or "your pro"
+    if outcome == COMPLETED:
+        await job_store.set_state(job_id, "completed")
+        await job_store.update_fields(job_id, outcome_status=COMPLETED)
+        await conversation_state_store.set(
+            phone,
+            MODE_AWAITING_JOB_FEEDBACK,
+            {"job_id": job_id, "active_feedback_job_id": job_id, "pro_phone": job.get("selected_pro_phone")},
+        )
+        await homeowner_store.update(phone, active_feedback_job_id=job_id)
+        await whatsapp_service.send_text_message(
+            phone,
+            f"Awesome! Glad *{name}* got it taken care of. "
+            "Mind sharing roughly how much you paid and how your experience was "
+            "(for example, 1-5 stars or a quick note)? Just reply in one message. "
+            "It helps us keep our local pro list in good shape.",
+        )
+        return
+    if outcome == SCHEDULED:
+        due = datetime.now(timezone.utc) + timedelta(hours=48)
+        await job_store.update_fields(
+            job_id,
+            outcome_status=PENDING,
+            checkin_due_at=due.isoformat(),
+            checkin_count=0,
+        )
+        await whatsapp_service.send_text_message(
+            phone,
+            "Got it! I'll check back in with you in a couple of days after the appointment.",
+        )
+        return
+    if outcome == FELL_THROUGH:
+        await job_store.update_fields(job_id, outcome_status=FELL_THROUGH)
+        trade = clean_template_value(job.get("trade"), "repair", limit=32)
+        await _send_choice(
+            phone,
+            settings.tpl_job_rescue_sid,
+            {"1": trade, "2": job_id},
+            (
+                f"Sorry to hear that! Would you like me to reach back out to other pros "
+                f"for your {trade} request ({job_ref(job_id)}), or close this request?\n\n"
+                "Reply *Find another pro* or *Close request*."
+            ),
+        )
+
+
+async def _reopen_fell_through(phone: str, job: dict[str, Any]) -> None:
+    """Show another quote, or ask a new set of pros, after a booking falls through."""
+    job_id = str(job.get("job_id") or "")
+    if job.get("state") != "assigned" or job.get("outcome_status") != "FELL_THROUGH":
+        await _already_updated(phone, job_id)
+        return
+    selected = normalize_phone(str(job.get("selected_pro_phone") or ""))
+    responses = await job_store.list_responses(job_id)
+    if selected:
+        await job_store.upsert_response(job_id, selected, status="not_selected")
+    others = [
+        response
+        for response in responses
+        if quote_is_pending(response)
+        and normalize_phone(str(response.get("pro_phone") or "")) != selected
+    ]
+    await job_store.update_fields(
+        job_id,
+        selected_pro_phone=None,
+        outcome_status=None,
+        checkin_due_at=None,
+        checkin_count=0,
+    )
+    if others:
+        fresh = await job_store.set_state(job_id, "awaiting_pick", selected_pro_phone=None)
+        await whatsapp_service.send_text_message(
+            phone,
+            f"Here is another quote I already have for {job_ref(job_id)}.",
+        )
+        await _deliver_quote_cards(fresh, others)
+        return
+    for response in responses:
+        pro_phone = normalize_phone(str(response.get("pro_phone") or ""))
+        if pro_phone and pro_phone != selected and response.get("status") == "interested":
+            await job_store.upsert_response(job_id, pro_phone, status="alerted")
+    fresh = await job_store.set_state(job_id, "dispatched", selected_pro_phone=None)
+    asked = await reask_pros(fresh)
+    await whatsapp_service.send_text_message(
+        phone,
+        f"I'll ask other pros about {job_ref(job_id)}. I pinged {asked}.",
+    )
+
+
+async def _capture_job_feedback(phone: str, text: str, ctx: dict[str, Any]) -> None:
+    from app.services.job_checkin import parse_job_feedback
+
+    job_id = str(ctx.get("active_feedback_job_id") or ctx.get("job_id") or "")
+    if not text:
+        await whatsapp_service.send_text_message(
+            phone, "Reply in one message with the price, a 1-5 rating, or a short note."
+        )
+        return
+    job = await job_store.get_job(job_id) if job_id else None
+    if not job or job.get("outcome_status") != "COMPLETED":
+        await conversation_state_store.clear(phone)
+        await homeowner_store.update(phone, active_feedback_job_id=None)
+        return
+    parsed = await parse_job_feedback(text)
+    await job_store.update_fields(
+        job_id,
+        final_price_paid=parsed["final_price_paid"],
+        homeowner_rating=parsed["rating_1_to_5"],
+        homeowner_review_text=parsed["review_summary"],
+    )
+    if not job.get("pro_stats_recorded"):
+        pro_phone = str(job.get("selected_pro_phone") or ctx.get("pro_phone") or "")
+        if pro_phone:
+            await pro_store.record_completed_job(pro_phone, parsed["rating_1_to_5"])
+        await job_store.update_fields(job_id, pro_stats_recorded=True)
+    await conversation_state_store.clear(phone)
+    await homeowner_store.update(phone, active_feedback_job_id=None)
+    await whatsapp_service.send_text_message(
+        phone,
+        "Thanks, that helps a lot. I'll use it to keep the local pro list in good shape.",
     )
 
 
@@ -1421,6 +1602,16 @@ async def _finalize_assignment(
         logger.warning("selected-pro notice failed: %s", e)
 
     await job_store.upsert_response(job_id, pro_n, status="selected")
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    await job_store.update_fields(
+        job_id,
+        connected_at=now.isoformat(),
+        checkin_due_at=(now + timedelta(hours=48)).isoformat(),
+        checkin_count=0,
+        outcome_status="PENDING_CHECKIN",
+    )
     for other in job.get("alerted_pro_phones") or []:
         other_n = normalize_phone(other)
         if other_n == pro_n:

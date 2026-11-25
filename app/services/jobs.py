@@ -26,7 +26,7 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "awaiting_consent": frozenset({"dispatched", "cancelled"}),
     "dispatched": frozenset({"awaiting_pick", "expired", "cancelled"}),
     "awaiting_pick": frozenset({"assigned", "expired", "cancelled"}),
-    "assigned": frozenset({"completed", "cancelled"}),
+    "assigned": frozenset({"completed", "cancelled", "awaiting_pick", "dispatched"}),
     "expired": frozenset({"cancelled"}),
     "completed": frozenset(),
     "cancelled": frozenset(),

@@ -357,6 +357,43 @@ class GeminiService:
         )
         return json.loads(response.text or "{}")
 
+    async def parse_job_feedback(self, message: str) -> dict[str, Any]:
+        """Pull a final price, a 1–5 rating, and a one-sentence review."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "final_price_paid": {"type": "string"},
+                "rating_1_to_5": {"type": "integer"},
+                "review_summary": {"type": "string"},
+            },
+            "required": ["final_price_paid", "rating_1_to_5", "review_summary"],
+        }
+        prompt = (
+            "A homeowner is describing how a hired repair went. "
+            "Extract the amount they paid, a rating from 1 to 5, and one clean sentence. "
+            "Use an empty string for the price when they did not mention money. "
+            "Use 0 for the rating when they did not rate the experience or the sentiment is unclear. "
+            "Do not invent a price or a rating.\n\n"
+            f"Message: {message}"
+        )
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                self.client.models.generate_content,
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=(
+                        "You extract a price and a rating from a short homeowner note. "
+                        "Return only the requested JSON."
+                    ),
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                ),
+            ),
+            timeout=30,
+        )
+        return json.loads(response.text or "{}")
+
     async def extract_pro_details(self, free_text: str) -> dict[str, Any]:
         """Structured extract of availability + estimate from pro free text."""
         schema = {
