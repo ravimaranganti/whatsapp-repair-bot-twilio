@@ -223,15 +223,30 @@ def test_help_handler_does_not_clear_pick_state(monkeypatch):
 def test_help_pro_shows_support_phone_when_set(monkeypatch):
     import app.services.welcome as welcome
 
+    monkeypatch.setattr(welcome.settings, "pro_support_contacts", "")
     monkeypatch.setattr(welcome.settings, "pro_support_phone", "+1 713-555-1212")
     text = help_pro_text()
     assert "DASHBOARD" in text
     assert "JOIN" in text
-    assert "+17135551212" in text
+    assert "+1 713-555-1212" in text
+
+
+def test_help_pro_names_ravi_and_jay(monkeypatch):
+    import app.services.welcome as welcome
+
+    monkeypatch.setattr(
+        welcome.settings,
+        "pro_support_contacts",
+        "Ravi:7134088948,Jay:3466819558",
+    )
+    text = help_pro_text()
+    assert "Ravi at +1 713-408-8948" in text
+    assert "Jay at +1 346-681-9558" in text
 
 
 def test_help_pro_hides_phone_line_when_unset(monkeypatch):
     import app.services.welcome as welcome
 
+    monkeypatch.setattr(welcome.settings, "pro_support_contacts", "")
     monkeypatch.setattr(welcome.settings, "pro_support_phone", "")
     assert "Call or text" not in help_pro_text()

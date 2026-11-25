@@ -94,7 +94,11 @@ class Settings(BaseSettings):
     )
     pro_support_phone: str = Field(
         default="",
-        description="Phone shown when a pro replies HELP. Empty hides the line.",
+        description="Single phone shown when a pro replies HELP, if PRO_SUPPORT_CONTACTS is empty.",
+    )
+    pro_support_contacts: str = Field(
+        default="Ravi:7134088948,Jay:3466819558",
+        description="Comma-separated Name:phone pairs shown when a pro replies HELP.",
     )
 
     # Phase 4 — dispatch

@@ -49,8 +49,48 @@ HELP_HOMEOWNER = (
     "- Tell me access notes to save for a visit (gate code, parking, pets)\n"
     "- Reply *FEEDBACK* anytime"
 )
+
+
+def _support_display(phone: str) -> str:
+    digits = normalize_phone(phone)
+    if len(digits) == 10:
+        digits = f"1{digits}"
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"+1 {digits[1:4]}-{digits[4:7]}-{digits[7:]}"
+    if len(digits) >= 10:
+        return to_e164(digits)
+    return ""
+
+
+def pro_support_line() -> str:
+    """Questions line for pros. Named contacts win over a single phone."""
+    raw = (settings.pro_support_contacts or "").strip()
+    contacts: list[tuple[str, str]] = []
+    if raw:
+        for part in raw.split(","):
+            piece = part.strip()
+            if not piece:
+                continue
+            name, phone = piece.split(":", 1) if ":" in piece else ("", piece)
+            shown = _support_display(phone)
+            if shown:
+                contacts.append((name.strip(), shown))
+    else:
+        shown = _support_display(settings.pro_support_phone)
+        if shown:
+            contacts.append(("", shown))
+    if not contacts:
+        return ""
+    bits = [f"{name} at {phone}" if name else phone for name, phone in contacts]
+    if len(bits) == 1:
+        return f"Questions? Call or text {bits[0]}."
+    if len(bits) == 2:
+        return f"Questions? Call or text {bits[0]} or {bits[1]}."
+    return "Questions? Call or text " + ", ".join(bits[:-1]) + f", or {bits[-1]}."
+
+
 def help_pro_text() -> str:
-    """Pro HELP menu. The support line appears only when PRO_SUPPORT_PHONE is set."""
+    """Pro HELP menu, including who to call."""
     lines = [
         "*Pro menu*",
         "- *PROFILE* — see your profile",
@@ -60,9 +100,9 @@ def help_pro_text() -> str:
         "- *STOP* — unsubscribe",
         "- *FEEDBACK* — send feedback",
     ]
-    digits = normalize_phone(settings.pro_support_phone)
-    if len(digits) >= 10:
-        lines.append(f"Questions? Call or text {to_e164(digits)}.")
+    line = pro_support_line()
+    if line:
+        lines.append(line)
     return "\n".join(lines)
 RETURNING_HOMEOWNER = "Welcome back! Send a photo of whatever needs fixing."
 PRO_IDLE = (
