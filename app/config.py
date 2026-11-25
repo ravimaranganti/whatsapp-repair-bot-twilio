@@ -42,6 +42,10 @@ class Settings(BaseSettings):
 
     # Gemini AI credentials
     gemini_api_key: str = Field(default="", description="Google Gemini API key")
+    google_places_api_key: str = Field(
+        default="",
+        description="Places API (New) key. Used only when no partner pro matches a job.",
+    )
 
     # Conversation memory: memory (default, single-process) or firestore (Cloud Run)
     conversation_backend: str = Field(

@@ -26,6 +26,7 @@
   .badge.quoted { background: #e7eef8; color: #1d4e89; }
   .badge.booked { background: #e5f3eb; color: var(--green-dark); }
   .badge.closed { background: var(--gray-bg); color: var(--muted); }
+  .badge.unmatched { background: var(--red-bg); color: var(--red); }
   .badge.urgent { background: var(--red-bg); color: var(--red); }
   .notice { background: #e5f3eb; border-radius: 12px; padding: 12px 14px; margin-bottom: 12px; }
   label { display: grid; gap: 4px; font-size: 14px; font-weight: 650; }
@@ -58,7 +59,7 @@
     <article class="metric">
       <span>Total jobs</span>
       <strong>{{ metrics.total_jobs }}</strong>
-      <span>{{ metrics.open_jobs }} open, waiting on a quote</span>
+      <span>{{ metrics.open_jobs }} open, waiting on a quote{% if metrics.unmatched_jobs %} · {{ metrics.unmatched_jobs }} to recruit{% endif %}</span>
     </article>
     <article class="metric">
       <span>Active pros</span>
@@ -86,7 +87,7 @@
 
   {% if tab == "jobs" %}
   <nav class="pills">
-    {% for key, label in [("all", "All"), ("open", "Open / Waiting"), ("quoted", "Quoted"), ("booked", "Booked"), ("closed", "Completed / Closed")] %}
+    {% for key, label in [("all", "All"), ("open", "Open / Waiting"), ("quoted", "Quoted"), ("booked", "Booked"), ("unmatched", "Unmet demand"), ("closed", "Completed / Closed")] %}
     <a class="{% if status == key %}on{% endif %}" href="/admin?tab=jobs&status={{ key }}">{{ label }}</a>
     {% endfor %}
   </nav>
@@ -95,11 +96,22 @@
     <article class="card">
       <div class="row">
         <h2>{{ job.ref }} · {{ job.trade }}</h2>
-        <span class="badge {{ job.bucket }}">{{ job.bucket }}</span>
+        <span class="badge {{ job.bucket }}">{% if job.bucket == "unmatched" %}Unmet demand{% else %}{{ job.bucket }}{% endif %}</span>
       </div>
       <p>{{ job.issue or "No issue summary" }}</p>
       <p class="meta">{{ job.zip or "No ZIP" }} · {{ job.homeowner_name }} · {{ job.homeowner_phone or "No phone" }} · {{ job.created }}</p>
-      {% if job.pipeline %}
+      {% if job.bucket == "unmatched" %}
+      <p>No neighbor-referred pro covers this trade and ZIP yet. Recruit one next.</p>
+      {% if job.fallback %}
+      <ul class="pipeline">
+        {% for place in job.fallback %}
+        <li>{{ place.name }} · {{ place.phone }} · {{ place.address }}{% if place.rating %} · {{ place.rating }}★{% endif %}</li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="meta">No outside specialist with a phone number was available.</p>
+      {% endif %}
+      {% elif job.pipeline %}
       <ul class="pipeline">
         {% for item in job.pipeline %}
         <li>{{ item.name }} ({{ item.phone }}) — {{ item.label }}</li>

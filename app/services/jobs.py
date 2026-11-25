@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Allowed transitions: from → frozenset(to)
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "diagnosed": frozenset({"awaiting_consent", "cancelled"}),
-    "awaiting_consent": frozenset({"dispatched", "cancelled"}),
+    "awaiting_consent": frozenset({"dispatched", "cancelled", "UNMATCHED_FALLBACK"}),
     "dispatched": frozenset({"awaiting_pick", "expired", "cancelled"}),
     "awaiting_pick": frozenset({"assigned", "expired", "cancelled"}),
     "assigned": frozenset({"completed", "cancelled", "awaiting_pick", "dispatched"}),

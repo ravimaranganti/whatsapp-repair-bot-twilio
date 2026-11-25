@@ -13,6 +13,7 @@ from app.models import (
     MODE_AWAITING_PICK,
     MODE_AWAITING_QUOTE_QUESTION,
     MODE_AWAITING_SHARE_NOTES,
+    MODE_AWAITING_VISIT_DETAILS,
     MODE_AWAITING_SHOW_OPTIONS,
     MODE_IDLE,
     MODE_PRO_AWAITING_DETAILS,
@@ -37,6 +38,12 @@ from app.services.homeowners import homeowner_store
 from app.services.jobs import job_store, resolve_pro_from_pick_payload
 from app.services.alert_reply import job_ref, resolve_alert_reply
 from app.services.matching import select_pros_for_job
+from app.services.places import (
+    dispatch_confirmation,
+    no_partner_message,
+    places_offer_message,
+    search_local_specialists,
+)
 from app.services.pro_profile import pro_fit_line
 from app.services.pro_reply import (
     QUOTE_READY,
@@ -191,15 +198,26 @@ async def _start_consent_flow(
         "diagnosis": diagnosis.model_dump(mode="json"),
         "photo_url": photo_url,
     }
-    if not ho.get("area_zip"):
+    from app.services.homeowner_profile import (
+        first_time_zip_prompt,
+        remember_homeowner,
+        saved_first_name,
+        saved_zip,
+    )
+
+    zip_code = saved_zip(ho)
+    trade = diagnosis.trade.value
+    if not zip_code:
         await conversation_state_store.set(phone, MODE_AWAITING_AREA, ctx)
-        await whatsapp_service.send_text_message(
-            phone,
-            "What's your ZIP code so I can find nearby pros?",
-        )
+        await whatsapp_service.send_text_message(phone, first_time_zip_prompt(trade))
         return
 
-    await _ask_dispatch_consent(phone, diagnosis, photo_url, ho["area_zip"])
+    if not ho.get("zip_code"):
+        await remember_homeowner(phone, zip_code=zip_code, first_name=saved_first_name(ho))
+    await dispatch_job(
+        phone,
+        {**ctx, "area_zip": zip_code},
+    )
 
 
 async def _ask_dispatch_consent(
@@ -487,6 +505,8 @@ async def _relay_quote_question(phone: str, text: str, ctx: dict[str, Any]) -> N
 
 async def handle_homeowner_typed(phone: str, body: str) -> bool:
     """Book / Yes / Pass with no locked button. Do not guess among several quotes."""
+    if await maybe_update_saved_zip(phone, body):
+        return True
     phrase = " ".join((body or "").lower().split())
     if phrase in {"job completed", "still scheduled", "didn't work out", "didnt work out"}:
         phone_n = normalize_phone(phone)
@@ -609,23 +629,34 @@ async def handle_homeowner_state(
         return True
 
     if mode == MODE_AWAITING_AREA:
-        zips = re.findall(r"\b\d{5}\b", text)
-        if not zips:
+        from app.services.homeowner_profile import (
+            first_time_zip_prompt,
+            read_zip_and_name,
+            remember_homeowner,
+        )
+
+        zip_code, first_name = await read_zip_and_name(text)
+        if not zip_code:
+            trade = str((ctx.get("diagnosis") or {}).get("trade") or "repair")
             await whatsapp_service.send_text_message(
-                phone_n, "Please send a 5-digit ZIP code (e.g. 77002)."
+                phone_n, first_time_zip_prompt(trade)
             )
             return True
-        await homeowner_store.update(phone_n, area_zip=zips[0])
+        await remember_homeowner(
+            phone_n,
+            zip_code=zip_code,
+            first_name=first_name or None,
+        )
         diag_data = ctx.get("diagnosis")
         if not diag_data:
             await conversation_state_store.clear(phone_n)
             await whatsapp_service.send_text_message(
-                phone_n, "Got your ZIP. Send a photo when you're ready."
+                phone_n, f"Saved *{zip_code}*. Send a photo when you're ready."
             )
             return True
         diagnosis = Diagnosis.model_validate(diag_data)
         await _ask_dispatch_consent(
-            phone_n, diagnosis, ctx.get("photo_url"), zips[0]
+            phone_n, diagnosis, ctx.get("photo_url"), zip_code
         )
         return True
 
@@ -684,6 +715,23 @@ async def handle_homeowner_state(
         if yes:
             await dispatch_job(phone_n, ctx)
             return True
+        from app.services.homeowner_profile import remember_homeowner, zip_only_update
+
+        changed = zip_only_update(text)
+        if changed and not ctx.get("diy_pending"):
+            await remember_homeowner(phone_n, zip_code=changed)
+            ctx["area_zip"] = changed
+            job_id = str(ctx.get("job_id") or "")
+            if job_id:
+                await job_store.update_fields(job_id, area_zip=changed)
+            await conversation_state_store.set(
+                phone_n, MODE_AWAITING_DISPATCH_CONSENT, ctx
+            )
+            await whatsapp_service.send_text_message(
+                phone_n,
+                f"Updated. I'll match near *{changed}*. Reply *Yes, find pros* or *No thanks*.",
+            )
+            return True
         await whatsapp_service.send_text_message(
             phone_n, "Reply *Yes, find pros* or *No thanks*."
         )
@@ -711,6 +759,10 @@ async def handle_homeowner_state(
             await conversation_state_store.clear(phone_n)
             return True
         await handle_pick(phone_n, job_id, text, payload)
+        return True
+
+    if mode == MODE_AWAITING_VISIT_DETAILS:
+        await _capture_visit_details(phone_n, text, ctx)
         return True
 
     if mode == MODE_AWAITING_SHARE_NOTES:
@@ -767,20 +819,8 @@ async def dispatch_job(phone: str, ctx: dict[str, Any]) -> None:
         issue=diag.pro_brief.issue or "",
     )
     if not pros:
-        await job_store.set_state(job_id, "cancelled")
-        await homeowner_store.update(phone_n, active_job_id=None)
-        await conversation_state_store.clear(phone_n)
-        await whatsapp_service.send_text_message(
-            phone_n,
-            "I couldn't find opted-in pros for that trade/ZIP yet. "
-            "We're still onboarding local pros — try again soon.",
-        )
-        await log_event(
-            phone=phone_n,
-            role="system",
-            type="dispatch_no_matches",
-            job_id=job_id,
-            payload={"trade": trade, "zip": area_zip},
+        await _record_unmatched_demand(
+            phone_n, job_id, diag.trade.value, area_zip
         )
         return
 
@@ -812,7 +852,7 @@ async def dispatch_job(phone: str, ctx: dict[str, Any]) -> None:
 
     await whatsapp_service.send_text_message(
         phone_n,
-        f"Sent to *{len(alerted)}* pros. I'll message you as each one replies.",
+        dispatch_confirmation(len(alerted), diag.trade.value, area_zip),
     )
     await conversation_state_store.clear(phone_n)
     await log_event(
@@ -830,6 +870,40 @@ async def dispatch_job(phone: str, ctx: dict[str, Any]) -> None:
         await enqueue_collection_window(job_id)
     except Exception as e:
         logger.warning("Could not schedule collection window: %s", e)
+
+
+async def _record_unmatched_demand(
+    phone: str, job_id: str, trade: str, area_zip: str
+) -> None:
+    """No partner pro matched. Keep the job visible as unmet demand."""
+    from app.services.homeowner_profile import trade_phrase
+
+    places = await search_local_specialists(trade, area_zip)
+    await job_store.set_state(job_id, "UNMATCHED_FALLBACK")
+    await job_store.update_fields(
+        job_id,
+        fallback_places=places,
+        fallback_query=f"{trade_phrase(trade)} near {area_zip or 'Houston'}, TX",
+    )
+    await homeowner_store.update(phone, active_job_id=None)
+    await conversation_state_store.clear(phone)
+    if places:
+        body = places_offer_message(trade, area_zip, places)
+    else:
+        body = no_partner_message(trade, area_zip)
+    await whatsapp_service.send_text_message(phone, body)
+    await log_event(
+        phone=phone,
+        role="system",
+        type="unmatched_fallback",
+        job_id=job_id,
+        payload={
+            "trade": trade,
+            "zip": area_zip,
+            "places": len(places),
+            "state": "UNMATCHED_FALLBACK",
+        },
+    )
 
 
 async def _send_job_alert(
@@ -1520,38 +1594,101 @@ async def handle_pick(
     await _choose_pro(phone_n, job, chosen)
 
 
-async def _choose_pro(phone: str, job: dict[str, Any], pro_phone: str) -> None:
+async def _ask_visit_details(phone: str, job: dict[str, Any], pro_phone: str) -> None:
+    """Street address and gate notes are collected only after they book."""
+    from app.services.homeowner_profile import visit_details_prompt
+
     phone_n = normalize_phone(phone)
     pro_n = normalize_phone(pro_phone)
     job_id = job["job_id"]
-    notes = await homeowner_store.list_service_notes(phone_n)
-    await job_store.set_state(job_id, "assigned", selected_pro_phone=pro_n)
-    if notes:
-        quote_hash = phone_hash(pro_n)
-        pro = await pro_store.get(pro_n)
-        pname = (pro or {}).get("business_name") or (pro or {}).get("name") or "the pro"
-        await conversation_state_store.set(
-            phone_n,
-            MODE_AWAITING_SHARE_NOTES,
-            {
-                "job_id": job_id,
-                "active_job_id": job_id,
-                "pro_phone": pro_n,
-                "active_quote_id": quote_hash,
-            },
-        )
-        await _send_choice(
-            phone_n,
-            settings.tpl_share_notes_sid,
-            {
-                "1": clean_template_value(pname, "the pro", limit=40),
-                "2": job_id,
-                "3": quote_hash,
-            },
-            f"Share your saved access notes with {pname} for {job_ref(job_id)}?\nReply *Yes* or *No*.",
+    pro = await pro_store.get(pro_n)
+    pname = (pro or {}).get("business_name") or (pro or {}).get("name") or "the pro"
+    ho = await homeowner_store.get(phone_n) or {}
+    street = str(ho.get("street_address") or "").strip()
+    notes = str(ho.get("saved_access_notes") or "").strip()
+    await conversation_state_store.set(
+        phone_n,
+        MODE_AWAITING_VISIT_DETAILS,
+        {
+            "job_id": job_id,
+            "active_job_id": job_id,
+            "pro_phone": pro_n,
+            "pro_name": pname,
+        },
+    )
+    await whatsapp_service.send_text_message(
+        phone_n, visit_details_prompt(pname, street, notes)
+    )
+
+
+async def _capture_visit_details(phone: str, text: str, ctx: dict[str, Any]) -> None:
+    from app.services.homeowner_profile import parse_visit_reply, remember_homeowner, visit_details_prompt
+
+    job_id = str(ctx.get("job_id") or "")
+    pro_phone = str(ctx.get("pro_phone") or "")
+    job = await job_store.get_job(job_id) if job_id else None
+    if not job or not pro_phone:
+        await conversation_state_store.clear(phone)
+        await whatsapp_service.send_text_message(
+            phone, "That booking expired. Tap Book This Pro on the quote again."
         )
         return
-    await _finalize_assignment(phone_n, job_id, pro_n, share_notes=False)
+    ho = await homeowner_store.get(phone) or {}
+    street = str(ho.get("street_address") or "").strip()
+    notes = str(ho.get("saved_access_notes") or "").strip()
+    parsed = parse_visit_reply(text)
+    pname = str(ctx.get("pro_name") or "the pro")
+
+    if parsed.get("confirm"):
+        if not street:
+            await whatsapp_service.send_text_message(
+                phone, visit_details_prompt(pname, "", notes)
+            )
+            return
+        await _complete_booking(phone, job, pro_phone)
+        return
+
+    if parsed.get("skip_notes"):
+        if not street:
+            await whatsapp_service.send_text_message(
+                phone,
+                "I still need the street address so the pro knows where to go. "
+                "A gate code can wait.",
+            )
+            return
+        await remember_homeowner(phone, saved_access_notes="")
+        await _complete_booking(phone, job, pro_phone)
+        return
+
+    new_street = str(parsed.get("street_address") or "").strip()
+    new_notes = parsed.get("saved_access_notes")
+    if new_street:
+        fields: dict[str, Any] = {"street_address": new_street}
+        if new_notes is not None:
+            fields["saved_access_notes"] = new_notes
+        await remember_homeowner(phone, **fields)
+        await _complete_booking(phone, job, pro_phone)
+        return
+    if new_notes and street:
+        await remember_homeowner(phone, saved_access_notes=new_notes)
+        await _complete_booking(phone, job, pro_phone)
+        return
+
+    await whatsapp_service.send_text_message(
+        phone, visit_details_prompt(pname, street, notes)
+    )
+
+
+async def _complete_booking(phone: str, job: dict[str, Any], pro_phone: str) -> None:
+    job_id = job["job_id"]
+    pro_n = normalize_phone(pro_phone)
+    if job.get("state") != "assigned":
+        await job_store.set_state(job_id, "assigned", selected_pro_phone=pro_n)
+    await _finalize_assignment(phone, job_id, pro_n, share_notes=True)
+
+
+async def _choose_pro(phone: str, job: dict[str, Any], pro_phone: str) -> None:
+    await _ask_visit_details(phone, job, pro_phone)
 
 
 async def _finalize_assignment(
@@ -1571,17 +1708,26 @@ async def _finalize_assignment(
     pname = (pro or {}).get("business_name") or (pro or {}).get("name") or "Your pro"
     pro_number = to_e164(pro_n)
 
-    await whatsapp_service.send_text_message(
-        phone_n,
+    ho = await homeowner_store.get(phone_n) or {}
+    street = str(ho.get("street_address") or "").strip()
+    access = str(ho.get("saved_access_notes") or "").strip()
+    connected = (
         f"You're connected with *{pname}*.\nPhone: {pro_number}\n"
-        "They also have your number — reach out to finalize timing.",
+        "They also have your number — reach out to finalize timing."
     )
+    if street:
+        connected += f"\nAddress sent: {street}"
+    await whatsapp_service.send_text_message(phone_n, connected)
 
     notes_text = ""
-    if share_notes:
+    if street:
+        notes_text += f"\nAddress: {street}"
+    if access:
+        notes_text += f"\nAccess notes: {access}"
+    elif share_notes:
         notes = await homeowner_store.list_service_notes(phone_n)
         if notes:
-            notes_text = "\n\nAccess notes from homeowner:\n" + "\n".join(
+            notes_text += "\n\nAccess notes from homeowner:\n" + "\n".join(
                 f"- {n}" for n in notes
             )
 
@@ -1669,3 +1815,48 @@ async def on_collection_window_closed(job_id: str) -> None:
     if not job or job.get("state") not in {"dispatched", "awaiting_pick"}:
         return
     await maybe_send_homeowner_options(job_id)
+
+
+async def maybe_update_saved_zip(phone: str, body: str) -> bool:
+    """A ZIP-only reply updates the saved profile without starting a new request."""
+    from app.services.homeowner_profile import (
+        parse_zip_and_name,
+        remember_homeowner,
+        saved_zip,
+        zip_only_update,
+    )
+
+    phone_n = normalize_phone(phone)
+    changed = zip_only_update(body)
+    if not changed:
+        return False
+    ho = await homeowner_store.get(phone_n)
+    if not ho:
+        return False
+    _, first = parse_zip_and_name(body or "")
+    previous = saved_zip(ho)
+    await remember_homeowner(phone_n, zip_code=changed, first_name=first or None)
+    job_id = str(ho.get("active_job_id") or "")
+    job = await job_store.get_job(job_id) if job_id else None
+    state = (job or {}).get("state")
+    if job and state in {"diagnosed", "awaiting_consent"}:
+        await job_store.update_fields(job_id, area_zip=changed)
+        await whatsapp_service.send_text_message(
+            phone_n, f"Updated. I'll match this request near *{changed}*."
+        )
+        return True
+    if job and state in {"dispatched", "awaiting_pick"} and previous and previous != changed:
+        await whatsapp_service.send_text_message(
+            phone_n,
+            f"Saved *{changed}* for next time. This request already went out near *{previous}*.",
+        )
+        return True
+    if previous == changed:
+        await whatsapp_service.send_text_message(
+            phone_n, f"Still matching near *{changed}*."
+        )
+        return True
+    await whatsapp_service.send_text_message(
+        phone_n, f"Saved *{changed}*. Send a photo when you need a pro."
+    )
+    return True

@@ -181,6 +181,7 @@ async def process_message(message: MessageContent, sender: str):
                 MODE_AWAITING_SHOW_OPTIONS,
                 "awaiting_area",
                 "awaiting_share_notes",
+                "awaiting_visit_details",
                 "awaiting_quote_question",
                 "awaiting_new_issue_confirm",
                 "awaiting_job_feedback",

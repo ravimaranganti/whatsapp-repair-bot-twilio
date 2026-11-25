@@ -465,5 +465,43 @@ class GeminiService:
         data = json.loads(response.text or "{}")
         return data if isinstance(data, dict) else {}
 
+    async def parse_homeowner_intro(self, message: str) -> dict[str, Any]:
+        """
+        Pull a 5-digit ZIP and an optional first name from a homeowner reply.
+        first_name is empty when they only sent a ZIP.
+        """
+        text = " ".join((message or "").split())
+        if not text or not settings.gemini_api_key or self.client is None:
+            return {}
+        schema = {
+            "type": "object",
+            "properties": {
+                "zip_code": {"type": "string"},
+                "first_name": {"type": "string"},
+            },
+            "required": ["zip_code", "first_name"],
+        }
+        prompt = (
+            "A homeowner is telling us where the job is. "
+            "Extract the 5-digit US ZIP code as zip_code and their first name "
+            "as first_name. If they do not give a first name, leave it empty. "
+            "Do not invent a name or a ZIP.\n\n"
+            f"Message: {text}"
+        )
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                self.client.models.generate_content,
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                ),
+            ),
+            timeout=30.0,
+        )
+        data = json.loads(response.text or "{}")
+        return data if isinstance(data, dict) else {}
+
 
 gemini_service = GeminiService()

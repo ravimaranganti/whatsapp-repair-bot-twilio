@@ -48,6 +48,8 @@ def is_quote(response: dict[str, Any]) -> bool:
 
 
 def job_bucket(state: str, responses: list[dict[str, Any]]) -> str:
+    if state == "UNMATCHED_FALLBACK":
+        return "unmatched"
     if state in {"completed", "cancelled", "expired"}:
         return "closed"
     if state == "assigned":
@@ -133,6 +135,7 @@ def summarize(jobs: list[dict[str, Any]], pros: list[dict[str, Any]]) -> dict[st
         "quoted_jobs": quoted,
         "completed_jobs": len(completed),
         "avg_ticket": average,
+        "unmatched_jobs": sum(1 for job in jobs if job.get("bucket") == "unmatched"),
     }
 
 
@@ -197,10 +200,11 @@ async def load_ops(
                 "rating": job.get("homeowner_rating"),
                 "review": str(job.get("homeowner_review_text") or ""),
                 "can_quote": bucket in {"open", "quoted"},
+                "fallback": list(job.get("fallback_places") or []),
             }
         )
     presented.sort(key=lambda item: item["created_sort"], reverse=True)
-    wanted = status if status in {"open", "quoted", "booked", "closed"} else "all"
+    wanted = status if status in {"open", "quoted", "booked", "closed", "unmatched"} else "all"
     visible_jobs = presented if wanted == "all" else [job for job in presented if job["bucket"] == wanted]
 
     needle = " ".join(query.lower().split())

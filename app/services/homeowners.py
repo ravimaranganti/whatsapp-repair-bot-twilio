@@ -37,11 +37,17 @@ class HomeownerStore:
                 return (await self.get(phone)) or existing
             return existing
         now = datetime.now(timezone.utc).isoformat()
+        zip_code = fields.get("zip_code") or fields.get("area_zip")
         doc = {
             "phone": normalize_phone(phone),
             "name": fields.get("name"),
-            "area_zip": fields.get("area_zip"),
+            "first_name": fields.get("first_name"),
+            "area_zip": zip_code,
+            "zip_code": zip_code,
+            "default_zone": fields.get("default_zone"),
             "neighborhood": fields.get("neighborhood"),
+            "street_address": fields.get("street_address"),
+            "saved_access_notes": fields.get("saved_access_notes"),
             "service_notes": [],
             "created_at": now,
             "active_job_id": None,

@@ -125,6 +125,7 @@ HOMEOWNER_JOB_MODES = frozenset(
         "awaiting_pick",
         "awaiting_show_options",
         "awaiting_share_notes",
+        "awaiting_visit_details",
         "awaiting_quote_question",
         "awaiting_new_issue_confirm",
     }
@@ -297,9 +298,11 @@ def waiting_reminder(mode: str, context: dict | None) -> str:
     if mode == MODE_AWAITING_JOIN_CODE:
         return "Reply with your pro join code to continue."
     if mode == "awaiting_area":
-        return "Send your 5-digit ZIP code to continue."
+        return "Send your 5-digit ZIP code, and your first name if you want."
     if mode == "awaiting_dispatch_consent":
         return "Reply *Yes* to find pros, or *No thanks*."
+    if mode == "awaiting_visit_details":
+        return "Send the street address for this visit, and any gate code. Reply *Yes* to use the saved one."
     if mode == "awaiting_share_notes":
         return "Reply *Yes* or *No* about sharing your access notes."
     if mode == "awaiting_quote_question":

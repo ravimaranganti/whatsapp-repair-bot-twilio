@@ -65,7 +65,9 @@ def checkin_is_due(job: dict[str, Any], now: datetime) -> bool:
 
 
 def homeowner_first_name(homeowner: dict[str, Any] | None) -> str:
-    raw = str((homeowner or {}).get("name") or "").strip()
+    raw = str(
+        (homeowner or {}).get("first_name") or (homeowner or {}).get("name") or ""
+    ).strip()
     first = raw.split()[0] if raw else "there"
     return first[:40]
 
