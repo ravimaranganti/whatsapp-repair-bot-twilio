@@ -105,7 +105,10 @@ async def process_message(message: MessageContent, sender: str):
         if await handle_pro_command(phone, message.body or ""):
             return
         if mode == MODE_PRO_ONBOARDING:
-            if await continue_onboarding(phone, message.body or "", state):
+            trade_payload = message.button_payload or message.list_id or ""
+            if await continue_onboarding(
+                phone, message.body or "", state, trade_payload
+            ):
                 return
 
         # Pro alert responses / details
@@ -244,7 +247,7 @@ async def handle_image_message(message: MessageContent, sender: str):
             await whatsapp_service.send_text_message(
                 sender,
                 "I couldn't analyze that photo. Please try another clear shot "
-                "of the issue (good lighting, whole fixture in frame).",
+                "of the job (good lighting, the whole area in frame).",
             )
             return
 
@@ -257,7 +260,7 @@ async def handle_image_message(message: MessageContent, sender: str):
         # Pro brief for repair team (no phone dump when dispatch enabled)
         pb = diagnosis.pro_brief
         pro_lines = [
-            "*For our repair team:*",
+            "*For a pro:*",
             f"*Issue:* {pb.issue}",
             f"*Likely cause:* {pb.likely_cause}",
             f"*Severity:* {diagnosis.severity.value}",

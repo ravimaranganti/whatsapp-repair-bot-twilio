@@ -31,8 +31,8 @@ from app.utils.phones import normalize_phone
 logger = logging.getLogger(__name__)
 
 WELCOME_TEXT = (
-    "👋 Hi! I'm Houston Home Repair AI. I help homeowners figure out repair "
-    "issues and connect with trusted local pros.\n\n"
+    "👋 Hi! I'm Houston Home Repair AI. I help with repairs, installs, mounting, "
+    "painting, and other home projects, and I can connect you with local pros.\n\n"
     "Which describes you?"
 )
 HOMEOWNER_READY = (
@@ -42,8 +42,8 @@ HOMEOWNER_READY = (
 )
 HELP_HOMEOWNER = (
     "*Homeowner menu*\n"
-    "- Send a photo of the issue\n"
-    "- Ask a repair question\n"
+    "- Send a photo of a repair, install, mount, or paint job\n"
+    "- Ask a question about the work\n"
     "- Reply *STATUS* to check your job\n"
     "- Tell me access notes to save for a visit (gate code, parking, pets)\n"
     "- Reply *FEEDBACK* anytime"

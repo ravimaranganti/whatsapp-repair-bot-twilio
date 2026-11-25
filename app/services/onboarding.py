@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import settings
@@ -13,20 +15,228 @@ from app.services.pros import pro_store
 from app.services.whatsapp import whatsapp_service
 from app.utils.phones import normalize_phone
 
-TRADE_OPTIONS = ["Plumbing", "HVAC", "Electrical", "Handyman", "Appliance"]
+logger = logging.getLogger(__name__)
+
 AVAIL_OPTIONS = ["Same day", "Next day", "Within a week"]
 
-TRADE_MAP = {
-    "plumbing": "plumbing",
-    "hvac": "hvac",
-    "electrical": "electrical",
-    "handyman": "handyman",
-    "appliance": "appliance",
+# Button / list ids. "other" asks them to type a trade that is not in the list.
+# WhatsApp list pickers allow 10 rows. Other is the last row, so nine named trades.
+TRADE_CHOICES: list[tuple[str, str]] = [
+    ("plumbing", "Plumbing"),
+    ("electrical", "Electrical"),
+    ("hvac", "HVAC"),
+    ("appliance", "Appliance"),
+    ("handyman", "Handyman"),
+    ("painting", "Painting"),
+    ("general_contractor", "General contractor"),
+    ("pool", "Pool"),
+    ("lawn", "Lawn & garden"),
+]
+TRADE_MAP = {key: key for key, _label in TRADE_CHOICES}
+TRADE_OTHER = "trade:other"
+TRADE_MORE_YES = "trade_more:yes"
+TRADE_MORE_NO = "trade_more:no"
+
+_TRADE_ALIASES: dict[str, tuple[str, ...]] = {
+    "plumbing": ("plumbing", "plumber", "plumbers"),
+    "hvac": ("hvac", "air conditioning", "heating"),
+    "electrical": ("electrical", "electrician", "electric"),
+    "handyman": ("handyman", "handy man"),
+    "appliance": ("appliance", "appliances"),
+    "painting": ("painting", "painter", "painters", "paint"),
+    "general_contractor": (
+        "general contractor",
+        "general contracting",
+        "remodel",
+        "remodeling",
+        "renovation",
+    ),
+    "pool": ("pool", "pools", "pool service"),
+    "lawn": ("lawn", "lawn care", "landscaping", "mowing"),
 }
+_DONE_WORDS = frozenset(
+    {
+        "no",
+        "nope",
+        "done",
+        "finished",
+        "that's all",
+        "thats all",
+        "that is all",
+        "all set",
+        "stop",
+    }
+)
+_MORE_WORDS = frozenset(
+    {"yes", "y", "yeah", "add", "add another", "another", "more"}
+)
+_NOT_A_TRADE = frozenset(
+    {
+        "other",
+        "yes",
+        "no",
+        "ok",
+        "okay",
+        "add",
+        "another",
+        "more",
+        "done",
+        "help",
+        "menu",
+    }
+)
 
 
 def parse_zips(text: str) -> list[str]:
     return re.findall(r"\b\d{5}\b", text or "")
+
+
+def _norm_phrase(text: str) -> str:
+    raw = (text or "").strip().lower().replace("’", "'")
+    return " ".join(raw.split())
+
+
+def known_trades_in_text(text: str) -> list[str]:
+    """Pull standard trades out of a typed reply. Order follows TRADE_CHOICES."""
+    low = _norm_phrase(text)
+    found: list[str] = []
+    for key, _label in TRADE_CHOICES:
+        for phrase in _TRADE_ALIASES[key]:
+            if re.search(rf"\b{re.escape(phrase)}\b", low):
+                found.append(key)
+                break
+    return found
+
+
+def normalize_custom_trade(text: str) -> str | None:
+    """A free-text trade such as 'roofing' or 'pest control'. None if it is not usable."""
+    raw = (text or "").lower().replace("&", " and ")
+    cleaned = " ".join(re.sub(r"[^a-z0-9 /-]", " ", raw).split())
+    cleaned = cleaned.strip(" /-")
+    if not cleaned or cleaned in _NOT_A_TRADE:
+        return None
+    if len(cleaned) < 2 or len(cleaned) > 40:
+        return None
+    if not re.search(r"[a-z]", cleaned):
+        return None
+    return cleaned
+
+
+def _leftover_custom(text: str, known: list[str]) -> str | None:
+    low = _norm_phrase(text)
+    phrases = [phrase for key in known for phrase in _TRADE_ALIASES[key]]
+    for phrase in sorted(phrases, key=len, reverse=True):
+        low = re.sub(rf"\b{re.escape(phrase)}\b", " ", low)
+    low = re.sub(r"\b(and|or)\b", " ", low)
+    low = low.replace(",", " ")
+    return normalize_custom_trade(low)
+
+
+@dataclass
+class TradeTurn:
+    """What to do with one reply during the trade step."""
+
+    action: str  # add | ask_other | show_list | done | invalid
+    trades: list[str] = field(default_factory=list)
+
+
+def interpret_trade_turn(
+    text: str,
+    payload: str,
+    stage: str,
+    selected: list[str] | None = None,
+) -> TradeTurn:
+    """
+    stage is choose (pick from the list), other (they are typing a custom trade),
+    or more (add another vs that's all).
+    """
+    stage = stage or "choose"
+    selected = list(selected or [])
+    pl = (payload or "").strip().lower()
+    phrase = _norm_phrase(text)
+
+    if pl == TRADE_MORE_NO or (stage == "more" and phrase in _DONE_WORDS):
+        return TradeTurn("done")
+    if pl == TRADE_MORE_YES or (stage == "more" and phrase in _MORE_WORDS):
+        return TradeTurn("show_list")
+    if pl == TRADE_OTHER or (stage == "choose" and phrase == "other"):
+        return TradeTurn("ask_other")
+
+    if pl.startswith("trade:"):
+        key = pl.split(":", 1)[1].strip()
+        if key in TRADE_MAP and key not in selected:
+            return TradeTurn("add", [key])
+        if key in TRADE_MAP:
+            return TradeTurn("add", [])
+        return TradeTurn("invalid")
+
+    if stage == "other":
+        custom = normalize_custom_trade(text)
+        if not custom or custom in selected:
+            return TradeTurn("invalid" if not custom else "add", [] if custom in selected else [])
+        return TradeTurn("add", [custom])
+
+    known = known_trades_in_text(text)
+    custom = _leftover_custom(text, known)
+    adds: list[str] = []
+    for key in known:
+        if key not in selected and key not in adds:
+            adds.append(key)
+    if custom and custom not in selected and custom not in adds and custom not in TRADE_MAP:
+        adds.append(custom)
+    if adds:
+        return TradeTurn("add", adds)
+    if known and all(key in selected for key in known):
+        return TradeTurn("add", [])
+    return TradeTurn("invalid")
+
+
+async def _send_trade_picker(phone: str) -> None:
+    """In-session list of trades. Falls back to text if the Content SID is missing."""
+    sid = (settings.tpl_pro_trades_sid or "").strip()
+    if sid:
+        try:
+            await whatsapp_service.send_content_template(phone, content_sid=sid)
+            return
+        except Exception as e:
+            logger.warning("pro trades list failed: %s", e)
+    lines = "\n".join(f"- {label}" for _key, label in TRADE_CHOICES)
+    await whatsapp_service.send_text_message(
+        phone,
+        "*Step 2/6:* Pick a trade. You can add more than one.\n\n"
+        f"{lines}\n"
+        "- Other\n\n"
+        "Reply with a trade, or type your own, like roofing. "
+        "After each one you can add another.",
+    )
+
+
+async def _send_trade_more(phone: str, selected: list[str]) -> None:
+    summary = ", ".join(selected) or "none yet"
+    sid = (settings.tpl_pro_trade_more_sid or "").strip()
+    if sid:
+        try:
+            await whatsapp_service.send_text_message(
+                phone,
+                f"Added: {summary}. You can pick more than one.",
+            )
+            await whatsapp_service.send_content_template(phone, content_sid=sid)
+            return
+        except Exception as e:
+            logger.warning("pro trade-more prompt failed: %s", e)
+    await whatsapp_service.send_text_message(
+        phone,
+        f"Added: {summary}. You can pick more than one.\n\n"
+        "Add another trade? Reply *Yes* or *That's all*.",
+    )
+
+
+async def _ask_custom_trade(phone: str) -> None:
+    await whatsapp_service.send_text_message(
+        phone,
+        "What's the trade? Type it in your own words, like roofing, painting, "
+        "or garage doors.",
+    )
 
 
 def join_code_ok(body: str) -> bool:
@@ -120,7 +330,12 @@ async def handle_pro_command(phone: str, body: str) -> bool:
     return False
 
 
-async def continue_onboarding(phone: str, body: str, state: dict[str, Any]) -> bool:
+async def continue_onboarding(
+    phone: str,
+    body: str,
+    state: dict[str, Any],
+    payload: str = "",
+) -> bool:
     """Advance multi-step JOIN flow. Returns True if handled."""
     if state.get("mode") != MODE_PRO_ONBOARDING:
         return False
@@ -139,35 +354,61 @@ async def continue_onboarding(phone: str, body: str, state: dict[str, Any]) -> b
             name, biz = text, text
         draft["name"] = name
         draft["business_name"] = biz
-        ctx.update({"step": 2, "draft": draft})
+        ctx.update({"step": 2, "trade_stage": "choose", "draft": draft})
         await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
-        opts = ", ".join(TRADE_OPTIONS)
-        await whatsapp_service.send_text_message(
-            phone_n,
-            f"*Step 2/6:* Which trade(s)? Reply with one or more of:\n{opts}",
-        )
+        await _send_trade_picker(phone_n)
         return True
 
     if step == 2:
-        found = []
-        low = text.lower()
-        for label, key in TRADE_MAP.items():
-            if label in low:
-                found.append(key)
-        if not found:
+        stage = str(ctx.get("trade_stage") or "choose")
+        selected = list(draft.get("trades") or [])
+        turn = interpret_trade_turn(text, payload, stage, selected)
+        if turn.action == "ask_other":
+            ctx.update({"trade_stage": "other", "draft": draft})
+            await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
+            await _ask_custom_trade(phone_n)
+            return True
+        if turn.action == "show_list":
+            ctx.update({"trade_stage": "choose", "draft": draft})
+            await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
+            await _send_trade_picker(phone_n)
+            return True
+        if turn.action == "done":
+            if not selected:
+                await whatsapp_service.send_text_message(
+                    phone_n, "Pick at least one trade before continuing."
+                )
+                await _send_trade_picker(phone_n)
+                return True
+            ctx.update({"step": 3, "draft": draft})
+            ctx.pop("trade_stage", None)
+            await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
             await whatsapp_service.send_text_message(
                 phone_n,
-                "Please reply with at least one trade: "
-                + ", ".join(TRADE_OPTIONS),
+                "*Step 3/6:* Which ZIP codes do you serve? (e.g. 77002 77006 77019)",
             )
             return True
-        draft["trades"] = found
-        ctx.update({"step": 3, "draft": draft})
-        await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
+        if turn.action == "add":
+            added = [trade for trade in turn.trades if trade not in selected]
+            if not added and not selected:
+                await _send_trade_picker(phone_n)
+                return True
+            selected.extend(added)
+            draft["trades"] = selected
+            ctx.update({"trade_stage": "more", "draft": draft})
+            await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
+            if not added:
+                await whatsapp_service.send_text_message(
+                    phone_n, "That's already on your list."
+                )
+            await _send_trade_more(phone_n, selected)
+            return True
         await whatsapp_service.send_text_message(
             phone_n,
-            "*Step 3/6:* Which ZIP codes do you serve? (e.g. 77002 77006 77019)",
+            "Tap a trade, or type one like plumbing or roofing.",
         )
+        if stage != "other":
+            await _send_trade_picker(phone_n)
         return True
 
     if step == 3:

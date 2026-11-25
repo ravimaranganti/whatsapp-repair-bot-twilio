@@ -100,6 +100,14 @@ class Settings(BaseSettings):
         default="",
         description="In-session welcome quick reply (role:homeowner / role:pro). No WhatsApp approval.",
     )
+    tpl_pro_trades_sid: str = Field(
+        default="",
+        description="In-session list picker for pro trades, including Other. No WhatsApp approval.",
+    )
+    tpl_pro_trade_more_sid: str = Field(
+        default="",
+        description="In-session quick reply: add another trade or that's all. No WhatsApp approval.",
+    )
 
     # Phase 5
     operator_phone: str = Field(
