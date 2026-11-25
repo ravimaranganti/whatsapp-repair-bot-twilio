@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 LICENSED_TRADES = frozenset({"plumbing", "electrical", "hvac"})
 
@@ -83,6 +86,102 @@ def interpret_insured(text: str, payload: str = "") -> bool | None:
     if phrase in {"no", "nope", "not insured", "uninsured"}:
         return False
     return None
+
+
+_NAME_INTRO = re.compile(
+    r"^(?:hi|hey|hello)[,!]?\s+|"
+    r"^(?:i am|i'm|im|this is|my name is|it's|its)\s+",
+    re.IGNORECASE,
+)
+_NAME_SEPARATORS = (
+    " / ",
+    "/",
+    " from ",
+    " at ",
+    " @ ",
+    " — ",
+    "—",
+    " – ",
+    "–",
+    " - ",
+    " | ",
+    ", ",
+)
+_NAME_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv"})
+
+
+def split_pro_name(text: str) -> tuple[str, str] | None:
+    """
+    (contact name, business name) from a plain reply.
+
+    A separator such as "from", "at", or "/" sets the business. A name on its
+    own leaves the business empty, which means they work solo.
+    """
+    raw = " ".join((text or "").split())
+    raw = _NAME_INTRO.sub("", raw).strip(" ,")
+    if not raw:
+        return None
+    lowered = raw.lower()
+    for sep in _NAME_SEPARATORS:
+        at = lowered.find(sep)
+        if at <= 0:
+            continue
+        contact = raw[:at].strip(" -|,.")
+        business = raw[at + len(sep):].strip(" -|,.")
+        if sep == ", " and business.lower().rstrip(".") in _NAME_SUFFIXES:
+            continue
+        if contact:
+            return contact[:80], business[:80]
+    return raw[:80], ""
+
+
+def _name_needs_model(text: str, business: str) -> bool:
+    """A short reply with a clear separator does not need the model."""
+    if business:
+        return False
+    words = text.split()
+    if len(words) > 4:
+        return True
+    return bool(re.search(r"\b(and|run|company|business|called|named)\b", text, re.I))
+
+
+async def read_pro_name(text: str) -> tuple[str, str] | None:
+    """
+    Contact name and business name.
+
+    A slash, "from", "at", or a dash is parsed directly. A longer sentence
+    goes through Gemini structured output, then the same fallback.
+    A solo name is stored as the business name too.
+    """
+    raw = " ".join((text or "").split())
+    if not raw:
+        return None
+    simple = split_pro_name(raw)
+    if simple and _name_needs_model(raw, simple[1]):
+        modeled = await _model_pro_name(raw)
+        if modeled:
+            return modeled
+    if not simple or not simple[0].strip():
+        return None
+    contact, business = simple
+    return contact, business or contact
+
+
+async def _model_pro_name(text: str) -> tuple[str, str] | None:
+    try:
+        from app.services.gemini import gemini_service
+
+        data = await gemini_service.parse_pro_name(text)
+    except Exception as exc:
+        logger.warning("pro name parse failed: %s", exc)
+        return None
+    if not isinstance(data, dict):
+        return None
+    contact = " ".join(str(data.get("contact_name") or "").split())[:80]
+    business = " ".join(str(data.get("business_name") or "").split())[:80]
+    if not contact:
+        return None
+    return contact, business or contact
 
 
 def clean_profile_note(text: str) -> str | None:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 
 import httpx
 
@@ -154,6 +155,46 @@ class WhatsAppService:
             except Exception:
                 pass
             return result
+
+    async def send_session_buttons(
+        self,
+        to: str,
+        body: str,
+        buttons: list[tuple[str, str]],
+    ) -> dict:
+        """
+        In-session quick replies. The body is the message itself, so it can
+        include the pro's own summary. No Meta approval inside the 24h window.
+        """
+        actions = [
+            {"title": title.strip()[:20], "id": button_id.strip()[:200]}
+            for button_id, title in buttons[:3]
+            if button_id.strip() and title.strip()
+        ]
+        if not actions:
+            raise ValueError("session buttons need at least one action")
+        content = {
+            "friendly_name": f"session_buttons_{uuid.uuid4().hex[:12]}",
+            "language": "en",
+            "types": {
+                "twilio/quick-reply": {
+                    "body": (body or "").strip()[:1024],
+                    "actions": actions,
+                }
+            },
+        }
+        async with httpx.AsyncClient() as client:
+            created = await client.post(
+                "https://content.twilio.com/v1/Content",
+                json=content,
+                auth=self._auth,
+                timeout=30.0,
+            )
+            created.raise_for_status()
+            content_sid = str(created.json().get("sid") or "")
+        if not content_sid:
+            raise RuntimeError("Twilio did not return a content sid")
+        return await self.send_content_template(to, content_sid=content_sid)
 
     async def send_business_message(
         self,

@@ -26,6 +26,7 @@ from app.services.pro_profile import (
     interpret_photo_estimate,
     language_label,
     needs_insurance_question,
+    read_pro_name,
 )
 from app.services.pros import pro_store
 from app.services.service_areas import (
@@ -90,6 +91,9 @@ _ONBOARDING_IDS = frozenset(
         "insured_no",
         "photo_est_yes",
         "photo_est_no",
+        "confirm_profile",
+        "edit_about",
+        "restart_onboarding",
     }
 )
 _ONBOARDING_TITLES = frozenset(
@@ -118,7 +122,46 @@ _ONBOARDING_TITLES = frozenset(
         "car detailing",
         "cleaning",
         "painting",
+        "looks good!",
+        "looks good",
+        "edit about",
+        "start over",
     }
+)
+
+CONFIRM_PROFILE = "confirm_profile"
+EDIT_ABOUT = "edit_about"
+RESTART_ONBOARDING = "restart_onboarding"
+_CONFIRM_BUTTONS = (
+    (CONFIRM_PROFILE, "Looks Good!"),
+    (EDIT_ABOUT, "Edit About"),
+    (RESTART_ONBOARDING, "Start Over"),
+)
+_CONFIRM_PHRASES = {
+    "looks good": CONFIRM_PROFILE,
+    "confirm": CONFIRM_PROFILE,
+    "confirm profile": CONFIRM_PROFILE,
+    "yes": CONFIRM_PROFILE,
+    "y": CONFIRM_PROFILE,
+    "yeah": CONFIRM_PROFILE,
+    "edit about": EDIT_ABOUT,
+    "edit": EDIT_ABOUT,
+    "start over": RESTART_ONBOARDING,
+    "restart": RESTART_ONBOARDING,
+    "restart onboarding": RESTART_ONBOARDING,
+}
+_NAME_PROMPT = (
+    "What's your name and business name? "
+    "(e.g., Roberto from ABC Lawn — or just your name if you work solo)"
+)
+_EDIT_ABOUT_PROMPT = (
+    "No problem! Send your updated note about your experience, specialties, or credentials."
+)
+_ACTIVATED = (
+    "You're in! We'll message you when a matching job comes in.\n\n"
+    "Reply DASHBOARD for your jobs and to update areas, timing, fee, photo estimates, "
+    "language, insurance, or your note. Reply JOIN again to change your name, business, "
+    "or trades. Reply HELP anytime."
 )
 
 
@@ -215,6 +258,47 @@ def format_trades(trades: list[str] | None) -> str:
     """Human labels for stored trade keys. Custom text is shown as typed."""
     labels = [TRADE_LABELS.get(str(trade), str(trade)) for trade in (trades or [])]
     return ", ".join(labels)
+
+
+def _yes_no(value: bool | None) -> str:
+    if value is True:
+        return "yes"
+    if value is False:
+        return "no"
+    return "—"
+
+
+def confirm_choice(text: str, payload: str = "", *, allow_text: bool = False) -> str:
+    """Looks Good, Edit About, or Start Over. Typed words count only on that step."""
+    pl = (payload or "").strip().lower()
+    if pl in {CONFIRM_PROFILE, EDIT_ABOUT, RESTART_ONBOARDING}:
+        return pl
+    if not allow_text:
+        return ""
+    phrase = _norm_phrase(text).rstrip("!")
+    return _CONFIRM_PHRASES.get(phrase, "")
+
+
+def profile_confirmation_text(draft: dict[str, Any]) -> str:
+    """Summary card shown before the profile goes live."""
+    name = " ".join(str(draft.get("name") or "").split()) or "—"
+    business = " ".join(str(draft.get("business_name") or "").split())
+    if business and business.lower() != name.lower():
+        who = f"{name} — {business}"
+    else:
+        who = name
+    return (
+        "Here's your profile summary — does everything look good?\n\n"
+        f"{who}\n"
+        f"Trades: {format_trades(draft.get('trades')) or '—'}\n"
+        f"Areas: {format_areas(draft.get('service_areas')) or '—'}\n"
+        f"{capacity_summary(draft.get('accepts_emergency'), draft.get('standard_lead_time'))}\n"
+        f"Free photo estimate: {_yes_no(draft.get('free_photo_estimate'))}\n"
+        f"Service call: {fee_label(draft.get('dispatch_fee_tier')) or '—'}\n"
+        f"Languages: {language_label(draft.get('languages')) or '—'}\n"
+        f"Insured: {_yes_no(draft.get('insured'))}\n"
+        f"About: {draft.get('profile_notes') or '—'}"
+    )
 
 
 def known_trades_in_text(text: str) -> list[str]:
@@ -520,13 +604,45 @@ async def _send_notes_prompt(phone: str, draft: dict[str, Any]) -> None:
     )
 
 
-async def _send_opt_in_prompt(phone: str, draft: dict[str, Any]) -> None:
-    total = _step_total(draft)
-    await whatsapp_service.send_text_message(
+async def _send_profile_confirmation(phone: str, draft: dict[str, Any]) -> None:
+    body = profile_confirmation_text(draft)
+    try:
+        await whatsapp_service.send_session_buttons(phone, body, list(_CONFIRM_BUTTONS))
+    except Exception as e:
+        logger.warning("profile confirmation buttons failed: %s", e)
+        await whatsapp_service.send_text_message(
+            phone,
+            body + "\n\nReply *Looks Good!*, *Edit About*, or *Start Over*.",
+        )
+
+
+async def _activate_pro(phone: str, draft: dict[str, Any]) -> None:
+    from datetime import datetime, timezone
+
+    await pro_store.upsert(
         phone,
-        f"*Step {total} of {total}:* You'll receive job alerts on WhatsApp. Reply STOP anytime.\n"
-        "Reply *Yes* to opt in, or *No* to cancel.",
+        name=draft.get("name"),
+        business_name=draft.get("business_name"),
+        trades=draft.get("trades") or [],
+        service_areas=draft.get("service_areas") or [],
+        service_zips=draft.get("service_zips") or [],
+        accepts_emergency=bool(draft.get("accepts_emergency")),
+        standard_lead_time=draft.get("standard_lead_time"),
+        availability_text=draft.get("availability_text"),
+        dispatch_fee_tier=draft.get("dispatch_fee_tier"),
+        rate_text=draft.get("rate_text"),
+        languages=draft.get("languages") or [],
+        insured=draft.get("insured"),
+        free_photo_estimate=draft.get("free_photo_estimate"),
+        profile_notes=draft.get("profile_notes") or "",
+        custom_trade_description=draft.get("custom_trade_description") or "",
+        opted_in=True,
+        opted_in_at=datetime.now(timezone.utc).isoformat(),
+        status="active",
     )
+    await conversation_state_store.clear(phone)
+    await whatsapp_service.send_text_message(phone, _ACTIVATED)
+    await log_event(phone=phone, role="pro", type="pro_opted_in", payload=draft)
 
 
 async def _advance_to_emergency(phone: str, ctx: dict[str, Any], draft: dict[str, Any]) -> None:
@@ -557,8 +673,7 @@ async def start_pro_onboarding(phone: str) -> None:
     await whatsapp_service.send_text_message(
         phone_n,
         "Welcome! Let's set up your pro profile.\n\n"
-        "*Step 1/7:* What's your name and business name?\n"
-        "(e.g. Mike / Mike's Plumbing)",
+        f"*Step 1:* {_NAME_PROMPT}",
     )
     await log_event(
         phone=phone_n, role="pro", type="pro_onboarding_started", payload={}
@@ -717,14 +832,40 @@ async def continue_onboarding(
             await _send_trade_picker(phone_n)
             return True
 
+    choice = confirm_choice(text, payload, allow_text=(step == 11))
+    if choice == RESTART_ONBOARDING:
+        await start_pro_onboarding(phone_n)
+        return True
+    if choice == CONFIRM_PROFILE:
+        if step != 11:
+            await whatsapp_service.send_text_message(
+                phone_n,
+                "We'll show your summary after the last question. "
+                "Reply with the answer to that question.",
+            )
+            return True
+        await _activate_pro(phone_n, draft)
+        return True
+    if choice == EDIT_ABOUT:
+        if step not in {10, 11}:
+            await whatsapp_service.send_text_message(
+                phone_n,
+                "You can edit that note after the last question.",
+            )
+            return True
+        ctx.update({"step": 10, "editing_about": True, "draft": draft})
+        await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
+        await whatsapp_service.send_text_message(phone_n, _EDIT_ABOUT_PROMPT)
+        return True
+
     if step == 1:
-        # "Name / Business"
-        if "/" in text:
-            name, biz = [p.strip() for p in text.split("/", 1)]
-        else:
-            name, biz = text, text
+        parsed = await read_pro_name(text)
+        if not parsed:
+            await whatsapp_service.send_text_message(phone_n, _NAME_PROMPT)
+            return True
+        name, business = parsed
         draft["name"] = name
-        draft["business_name"] = biz
+        draft["business_name"] = business or name
         ctx.update({"step": 2, "trade_stage": "choose", "draft": draft})
         await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
         await _send_trade_picker(phone_n)
@@ -929,70 +1070,25 @@ async def continue_onboarding(
 
     if step == 10:
         note = clean_profile_note(text)
+        editing = bool(ctx.get("editing_about"))
         if note is None:
-            await whatsapp_service.send_text_message(
-                phone_n, "Send a short note, or reply *Skip*."
-            )
-            await _send_notes_prompt(phone_n, draft)
+            if editing:
+                await whatsapp_service.send_text_message(phone_n, _EDIT_ABOUT_PROMPT)
+            else:
+                await whatsapp_service.send_text_message(
+                    phone_n, "Send a short note, or reply *Skip*."
+                )
+                await _send_notes_prompt(phone_n, draft)
             return True
         draft["profile_notes"] = note
+        ctx.pop("editing_about", None)
         ctx.update({"step": 11, "draft": draft})
         await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
-        await _send_opt_in_prompt(phone_n, draft)
+        await _send_profile_confirmation(phone_n, draft)
         return True
 
     if step == 11:
-        if text.lower() in {"yes", "y", "yeah", "sure"}:
-            from datetime import datetime, timezone
-
-            await pro_store.upsert(
-                phone_n,
-                name=draft.get("name"),
-                business_name=draft.get("business_name"),
-                trades=draft.get("trades") or [],
-                service_areas=draft.get("service_areas") or [],
-                service_zips=draft.get("service_zips") or [],
-                accepts_emergency=bool(draft.get("accepts_emergency")),
-                standard_lead_time=draft.get("standard_lead_time"),
-                availability_text=draft.get("availability_text"),
-                dispatch_fee_tier=draft.get("dispatch_fee_tier"),
-                rate_text=draft.get("rate_text"),
-                languages=draft.get("languages") or [],
-                insured=draft.get("insured"),
-                free_photo_estimate=draft.get("free_photo_estimate"),
-                profile_notes=draft.get("profile_notes") or "",
-                custom_trade_description=draft.get("custom_trade_description") or "",
-                opted_in=True,
-                opted_in_at=datetime.now(timezone.utc).isoformat(),
-                status="active",
-            )
-            await conversation_state_store.clear(phone_n)
-            trades = format_trades(draft.get("trades")) or "—"
-            areas = format_areas(draft.get("service_areas")) or "—"
-            await whatsapp_service.send_text_message(
-                phone_n,
-                "You're in! Here's your summary:\n"
-                f"*{draft.get('business_name') or draft.get('name')}*\n"
-                f"Trades: {trades}\nAreas: {areas}\n"
-                f"{capacity_summary(draft.get('accepts_emergency'), draft.get('standard_lead_time'))}\n"
-                f"Free photo estimate: {'yes' if draft.get('free_photo_estimate') is True else 'no' if draft.get('free_photo_estimate') is False else '—'}\n"
-                f"Service call: {fee_label(draft.get('dispatch_fee_tier')) or '—'}\n"
-                f"Languages: {language_label(draft.get('languages')) or '—'}\n"
-                f"Insured: {'yes' if draft.get('insured') is True else 'no' if draft.get('insured') is False else '—'}\n"
-                f"About: {draft.get('profile_notes') or '—'}\n\n"
-                "We'll message you when a matching job comes in.\n\n"
-                "Reply *DASHBOARD* for your jobs and to update areas, timing, fee, photo estimates, language, insurance, or your note. "
-                "Reply *JOIN* again to change your name, business, or trades. Reply *HELP* anytime.",
-            )
-            await log_event(
-                phone=phone_n, role="pro", type="pro_opted_in", payload=draft
-            )
-        else:
-            await conversation_state_store.clear(phone_n)
-            await whatsapp_service.send_text_message(
-                phone_n,
-                "No problem — profile saved but not opted in. Reply JOIN to try again.",
-            )
+        await _send_profile_confirmation(phone_n, draft)
         return True
 
     return False

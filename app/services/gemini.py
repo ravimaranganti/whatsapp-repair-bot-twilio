@@ -426,5 +426,44 @@ class GeminiService:
         )
         return json.loads(response.text or "{}")
 
+    async def parse_pro_name(self, message: str) -> dict[str, Any]:
+        """
+        Pull a person's name and an optional business name out of a plain reply.
+        business_name is empty when they only gave a personal name.
+        """
+        text = " ".join((message or "").split())
+        if not text or not settings.gemini_api_key or self.client is None:
+            return {}
+        schema = {
+            "type": "object",
+            "properties": {
+                "contact_name": {"type": "string"},
+                "business_name": {"type": "string"},
+            },
+            "required": ["contact_name", "business_name"],
+        }
+        prompt = (
+            "A home-repair professional is introducing themselves. "
+            "Extract the person's name as contact_name and the business name "
+            "as business_name. If they only give a personal name, leave "
+            "business_name empty. Do not invent a business, a last name, "
+            "or a city. Keep their wording.\n\n"
+            f"Message: {text}"
+        )
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                self.client.models.generate_content,
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                ),
+            ),
+            timeout=30.0,
+        )
+        data = json.loads(response.text or "{}")
+        return data if isinstance(data, dict) else {}
+
 
 gemini_service = GeminiService()
