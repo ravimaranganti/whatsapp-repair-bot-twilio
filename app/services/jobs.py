@@ -187,6 +187,19 @@ class JobStore:
 
         return await asyncio.to_thread(_read)
 
+    async def list_all(self) -> list[dict[str, Any]]:
+        """Pilot-scale scan of every job, newest caller sorts them."""
+
+        def _read() -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for snap in self._db().collection(self._collection).stream():
+                data = snap.to_dict() or {}
+                data["job_id"] = snap.id
+                out.append(data)
+            return out
+
+        return await asyncio.to_thread(_read)
+
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
         def _read() -> dict[str, Any] | None:
             snap = self._db().collection(self._collection).document(job_id).get()

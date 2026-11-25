@@ -318,7 +318,14 @@ def interpret_trade_turn(
 
 
 async def _send_trade_picker(phone: str) -> None:
-    """In-session list. Falls back to text if the Content SID is missing."""
+    """Multi-select Flow, then the old list, then plain text."""
+    flow_sid = (settings.pro_profile_flow_content_sid or "").strip()
+    if flow_sid:
+        try:
+            await whatsapp_service.send_content_template(phone, content_sid=flow_sid)
+            return
+        except Exception as e:
+            logger.warning("pro profile flow failed: %s", e)
     sid = (settings.tpl_pro_trades_sid or "").strip()
     if sid:
         try:
@@ -433,7 +440,8 @@ async def _send_lead_time_prompt(phone: str) -> None:
     )
 
 
-async def _send_fee_prompt(phone: str) -> None:
+async def _send_fee_prompt(phone: str, draft: dict[str, Any]) -> None:
+    total = _step_total(draft)
     sid = (settings.tpl_pro_fee_sid or "").strip()
     if sid:
         try:
@@ -443,7 +451,8 @@ async def _send_fee_prompt(phone: str) -> None:
             logger.warning("pro fee prompt failed: %s", e)
     await whatsapp_service.send_text_message(
         phone,
-        "*Step 6/7:* What is your typical service call / diagnostic fee to come out and assess a job?\n\n"
+        f"*Step 7 of {total}:* Do you charge a service call or diagnostic fee "
+        "to come out and assess the job?\n\n"
         "Reply *Free estimate*, *$50 – $99*, or *$100+*.",
     )
 
@@ -463,7 +472,7 @@ async def _send_photo_estimate_prompt(phone: str, draft: dict[str, Any]) -> None
             logger.warning("pro photo-estimate prompt failed: %s", e)
     await whatsapp_service.send_text_message(
         phone,
-        f"*Step 7 of {total}:* If a homeowner sends photos of the issue, "
+        f"*Step 6 of {total}:* If a homeowner sends photos of the issue, "
         "can you give a rough estimate for free?\n\n"
         "Reply *Yes* or *No*.",
     )
@@ -630,8 +639,8 @@ async def handle_pro_command(phone: str, body: str) -> bool:
             f"Areas: {areas}\n"
             f"Urgent calls: {'yes' if pro.get('accepts_emergency') else 'no' if 'accepts_emergency' in pro else '—'}\n"
             f"Lead time: {lead_label(pro.get('standard_lead_time')) or pro.get('availability_text') or '—'}\n"
-            f"Service call: {fee_label(pro.get('dispatch_fee_tier')) or pro.get('rate_text') or '—'}\n"
             f"Free photo estimate: {'yes' if pro.get('free_photo_estimate') is True else 'no' if pro.get('free_photo_estimate') is False else '—'}\n"
+            f"Service call: {fee_label(pro.get('dispatch_fee_tier')) or pro.get('rate_text') or '—'}\n"
             f"Languages: {language_label(pro.get('languages')) or '—'}\n"
             f"Insured: {'yes' if pro.get('insured') is True else 'no' if pro.get('insured') is False else '—'}\n"
             f"About: {pro.get('profile_notes') or '—'}\n"
@@ -650,11 +659,30 @@ async def handle_pro_command(phone: str, body: str) -> bool:
     return False
 
 
+async def _apply_flow_pick(
+    phone: str, ctx: dict[str, Any], draft: dict[str, Any], pick: Any
+) -> None:
+    from app.services.pro_flow import zones_for_storage
+
+    areas, zips = zones_for_storage(list(pick.zones))
+    draft["trades"] = list(pick.trades)
+    draft["service_areas"] = areas
+    draft["service_zips"] = zips
+    if pick.wants_other:
+        ctx.update({"step": 2, "trade_stage": "other", "draft": draft})
+        await conversation_state_store.set(phone, MODE_PRO_ONBOARDING, ctx)
+        await _ask_custom_trade(phone)
+        return
+    draft.pop("custom_trade_description", None)
+    await _advance_to_emergency(phone, ctx, draft)
+
+
 async def continue_onboarding(
     phone: str,
     body: str,
     state: dict[str, Any],
     payload: str = "",
+    interactive_data: str = "",
 ) -> bool:
     """Advance multi-step JOIN flow. Returns True if handled."""
     if state.get("mode") != MODE_PRO_ONBOARDING:
@@ -665,6 +693,29 @@ async def continue_onboarding(
     draft: dict[str, Any] = dict(ctx.get("draft") or {})
     text = (body or "").strip()
     phone_n = normalize_phone(phone)
+
+    if step in {2, 3}:
+        from app.services.pro_flow import parse_flow_submission
+
+        pick = parse_flow_submission(interactive_data)
+        if pick is not None:
+            if not pick.ok:
+                await whatsapp_service.send_text_message(
+                    phone_n,
+                    "Select at least one service and one area, then save the form. "
+                    "You can also type them, like plumbing and Katy.",
+                )
+                await _send_trade_picker(phone_n)
+                return True
+            await _apply_flow_pick(phone_n, ctx, draft, pick)
+            return True
+        if _norm_phrase(text) == "sent":
+            await whatsapp_service.send_text_message(
+                phone_n,
+                "Open the form to select your services and areas, or type them here.",
+            )
+            await _send_trade_picker(phone_n)
+            return True
 
     if step == 1:
         # "Name / Business"
@@ -712,6 +763,14 @@ async def continue_onboarding(
                 return True
             selected.extend(added)
             draft["trades"] = selected
+            if stage == "other":
+                custom = [item for item in added if item not in {key for key, _label in TRADE_CHOICES}]
+                draft["custom_trade_description"] = (
+                    ", ".join(custom) if custom else text
+                )[:80]
+            if draft.get("service_areas"):
+                await _advance_to_emergency(phone_n, ctx, draft)
+                return True
             ctx.update({"trade_stage": "more", "draft": draft})
             await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
             if not added:
@@ -801,25 +860,10 @@ async def continue_onboarding(
         draft["availability_text"] = lead_label(lead)
         ctx.update({"step": 6, "draft": draft})
         await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
-        await _send_fee_prompt(phone_n)
-        return True
-
-    if step == 6:
-        fee = interpret_dispatch_fee(text, payload)
-        if not fee:
-            await whatsapp_service.send_text_message(
-                phone_n, "Tap *Free estimate*, *$50 – $99*, or *$100+*."
-            )
-            await _send_fee_prompt(phone_n)
-            return True
-        draft["dispatch_fee_tier"] = fee
-        draft["rate_text"] = fee_label(fee)
-        ctx.update({"step": 7, "draft": draft})
-        await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
         await _send_photo_estimate_prompt(phone_n, draft)
         return True
 
-    if step == 7:
+    if step == 6:
         answer = interpret_photo_estimate(text, payload)
         if answer is None:
             await whatsapp_service.send_text_message(
@@ -829,6 +873,21 @@ async def continue_onboarding(
             await _send_photo_estimate_prompt(phone_n, draft)
             return True
         draft["free_photo_estimate"] = answer
+        ctx.update({"step": 7, "draft": draft})
+        await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
+        await _send_fee_prompt(phone_n, draft)
+        return True
+
+    if step == 7:
+        fee = interpret_dispatch_fee(text, payload)
+        if not fee:
+            await whatsapp_service.send_text_message(
+                phone_n, "Tap *Free estimate*, *$50 – $99*, or *$100+*."
+            )
+            await _send_fee_prompt(phone_n, draft)
+            return True
+        draft["dispatch_fee_tier"] = fee
+        draft["rate_text"] = fee_label(fee)
         ctx.update({"step": 8, "draft": draft})
         await conversation_state_store.set(phone_n, MODE_PRO_ONBOARDING, ctx)
         await _send_language_prompt(phone_n, draft)
@@ -902,6 +961,7 @@ async def continue_onboarding(
                 insured=draft.get("insured"),
                 free_photo_estimate=draft.get("free_photo_estimate"),
                 profile_notes=draft.get("profile_notes") or "",
+                custom_trade_description=draft.get("custom_trade_description") or "",
                 opted_in=True,
                 opted_in_at=datetime.now(timezone.utc).isoformat(),
                 status="active",
@@ -915,8 +975,8 @@ async def continue_onboarding(
                 f"*{draft.get('business_name') or draft.get('name')}*\n"
                 f"Trades: {trades}\nAreas: {areas}\n"
                 f"{capacity_summary(draft.get('accepts_emergency'), draft.get('standard_lead_time'))}\n"
-                f"Service call: {fee_label(draft.get('dispatch_fee_tier')) or '—'}\n"
                 f"Free photo estimate: {'yes' if draft.get('free_photo_estimate') is True else 'no' if draft.get('free_photo_estimate') is False else '—'}\n"
+                f"Service call: {fee_label(draft.get('dispatch_fee_tier')) or '—'}\n"
                 f"Languages: {language_label(draft.get('languages')) or '—'}\n"
                 f"Insured: {'yes' if draft.get('insured') is True else 'no' if draft.get('insured') is False else '—'}\n"
                 f"About: {draft.get('profile_notes') or '—'}\n\n"

@@ -124,6 +124,10 @@ class Settings(BaseSettings):
         default="",
         description="In-session quick reply: add another trade or that's all. No WhatsApp approval.",
     )
+    pro_profile_flow_content_sid: str = Field(
+        default="",
+        description="WhatsApp Flow for multi-select trades and service areas. Needs approval.",
+    )
     tpl_pro_areas_sid: str = Field(
         default="",
         description="In-session list picker for Houston service areas. No WhatsApp approval.",
@@ -209,6 +213,10 @@ class Settings(BaseSettings):
     tpl_job_rescue_sid: str = Field(
         default="",
         description="In-session Find Another Pro / Close Request after a booked job falls through.",
+    )
+    admin_password: str = Field(
+        default="",
+        description="Password for the /admin ops dashboard. Empty disables the page.",
     )
     operator_phone: str = Field(
         default="",

@@ -56,6 +56,22 @@ class ConversationStateStore:
             # Local without Firestore — ignore
             pass
 
+    async def list_all(self) -> dict[str, dict[str, Any]]:
+        """Phone → session, for the admin view of unfinished pro signup."""
+
+        def _read() -> dict[str, dict[str, Any]]:
+            from app.services.firestore_db import get_db
+
+            out: dict[str, dict[str, Any]] = {}
+            for snap in get_db().collection(self._collection).stream():
+                out[normalize_phone(snap.id)] = snap.to_dict() or {}
+            return out
+
+        try:
+            return await asyncio.to_thread(_read)
+        except Exception:
+            return {}
+
     async def clear(self, phone: str) -> None:
         await self.set(phone, MODE_IDLE, {})
 

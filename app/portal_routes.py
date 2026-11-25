@@ -152,6 +152,8 @@ async def pro_profile_save(request: Request):
             "standard_lead_time": form.get("standard_lead_time"),
             "dispatch_fee_tier": form.get("dispatch_fee_tier"),
             "service_areas": areas,
+            "trades": form.getlist("trades"),
+            "custom_trade_description": form.get("custom_trade_description"),
             "languages": form.getlist("languages"),
             "insured": form.get("insured"),
             "free_photo_estimate": form.get("free_photo_estimate"),

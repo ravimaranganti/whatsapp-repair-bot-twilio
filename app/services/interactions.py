@@ -35,7 +35,11 @@ def parse_interaction(form: Mapping[str, Any]) -> Interaction:
         or ""
     ).strip()
     interactive = str(
-        form.get("InteractiveData") or form.get("interactive_data") or ""
+        form.get("InteractiveData")
+        or form.get("interactive_data")
+        or form.get("FlowData")
+        or form.get("flow_data")
+        or ""
     ).strip()
     media_url = form.get("MediaUrl0") or form.get("media_url0") or form.get("media_url")
     media_type = (
@@ -57,8 +61,8 @@ def parse_interaction(form: Mapping[str, Any]) -> Interaction:
 
     if interactive:
         return Interaction(
-            kind="quick_reply",
-            payload=interactive,
+            kind="flow",
+            payload="",
             text=body or button_text,
         )
 

@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Admin login · HomePro Assistant{% endblock %}
+{% block head %}
+<meta name="robots" content="noindex">
+<style>
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px; margin-top: 18px; display: grid; gap: 12px; }
+  h1 { font-family: Georgia, serif; font-size: 28px; font-weight: 600; margin-top: 6px; }
+  label { display: grid; gap: 4px; font-weight: 650; }
+  input[type="password"] {
+    width: 100%; min-height: 48px; border: 1px solid var(--line); border-radius: 12px;
+    padding: 10px 12px; font: inherit;
+  }
+  .notice { background: var(--red-bg); color: var(--red); border-radius: 12px; padding: 12px 14px; }
+  .top { padding-top: 28px; }
+</style>
+{% endblock %}
+{% block body %}
+<div class="wrap">
+  <div class="top">
+    <p class="eyebrow">HomePro Assistant</p>
+    <h1>Ops login</h1>
+  </div>
+  <div class="card">
+    {% if not configured %}
+      <p>Admin login is off until ADMIN_PASSWORD is set on the server.</p>
+    {% else %}
+      {% if notice %}<p class="notice">{{ notice }}</p>{% endif %}
+      <form class="stack" method="post" action="/admin/login">
+        <label>Password
+          <input type="password" name="password" autocomplete="current-password" required>
+        </label>
+        <button class="btn btn-primary" type="submit">Sign in</button>
+      </form>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

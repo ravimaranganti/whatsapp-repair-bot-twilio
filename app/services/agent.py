@@ -118,7 +118,13 @@ async def process_message(message: MessageContent, sender: str):
             return
         tap = message.button_payload or message.list_id or ""
         if mode == MODE_PRO_ONBOARDING:
-            if await continue_onboarding(phone, message.body or "", state, tap):
+            if await continue_onboarding(
+                phone,
+                message.body or "",
+                state,
+                tap,
+                message.interactive_data or "",
+            ):
                 return
         elif is_onboarding_tap(
             tap, message.body or "", interactive=message.type == "interactive"

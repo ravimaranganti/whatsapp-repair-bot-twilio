@@ -126,6 +126,19 @@ class ProStore:
 
         return await asyncio.to_thread(_read)
 
+    async def list_all(self) -> list[dict[str, Any]]:
+        """Pilot-scale scan of every pro profile."""
+
+        def _read() -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for snap in self._db().collection(self._collection).stream():
+                data = snap.to_dict() or {}
+                data["phone"] = snap.id
+                out.append(data)
+            return out
+
+        return await asyncio.to_thread(_read)
+
     async def push_pending_alert(self, phone: str, job_id: str) -> None:
         def _write() -> None:
             from google.cloud import firestore

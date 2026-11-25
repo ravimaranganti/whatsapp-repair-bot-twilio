@@ -169,6 +169,22 @@
         <input type="text" name="profile_notes" maxlength="500" value="{{ profile_notes|default('') }}" placeholder="12 years, tankless water heaters, bilingual crew">
       </label>
       <div>
+        <b>Services</b>
+        {% for trade in trade_choices %}
+        <label class="check">
+          <input type="checkbox" name="trades" value="{{ trade.key }}" {% if trade.key in selected_trades %}checked{% endif %}>
+          <span>{{ trade.label }}{% if trade.note %}<small>{{ trade.note }}</small>{% endif %}</span>
+        </label>
+        {% endfor %}
+        <label class="check">
+          <input type="checkbox" name="trades" value="other" {% if custom_trade_description %}checked{% endif %}>
+          <span>Other<small>Pool, lawn, sprinkler, or another trade</small></span>
+        </label>
+      </div>
+      <label>Other expertise
+        <input type="text" name="custom_trade_description" maxlength="80" value="{{ custom_trade_description|default('') }}" placeholder="Roofing, pool, lawn">
+      </label>
+      <div>
         <b>Greater Houston areas</b>
         {% for area in areas %}
         <label class="check">

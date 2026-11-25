@@ -9,6 +9,7 @@ from typing import Any
 
 from app.services.alert_reply import job_ref
 from app.services.pro_capacity import FEE_LABELS, LEAD_LABELS, fee_label, lead_label
+from app.services.pro_flow import trade_form_state
 from app.services.pro_profile import needs_insurance_question
 from app.services.service_areas import AREA_ALL, AREA_CHOICES, AREA_LABELS, area_for_zip, area_label, zips_for_areas
 from app.utils.phones import normalize_phone, to_e164
@@ -128,6 +129,17 @@ def clean_profile_form(data: dict[str, Any]) -> dict[str, Any] | str:
     photo = str(data.get("free_photo_estimate") or "")
     if photo in {"yes", "no"}:
         cleaned["free_photo_estimate"] = photo == "yes"
+    if "trades" in data or "custom_trade_description" in data:
+        from app.services.pro_flow import normalize_saved_trades
+
+        saved = normalize_saved_trades(
+            data.get("trades") or [],
+            str(data.get("custom_trade_description") or ""),
+        )
+        if isinstance(saved, str):
+            return saved
+        cleaned["trades"] = saved[0]
+        cleaned["custom_trade_description"] = saved[1]
     return cleaned
 
 
@@ -260,6 +272,10 @@ async def load_dashboard(phone: str) -> dict[str, Any]:
         "open_alerts": open_alerts,
         "history": history,
         "areas": area_options(list(pro.get("service_areas") or [])),
+        **trade_form_state(
+            list(pro.get("trades") or []),
+            str(pro.get("custom_trade_description") or ""),
+        ),
         "lead": pro.get("standard_lead_time") or "",
         "fee": pro.get("dispatch_fee_tier") or "",
         "emergency": bool(pro.get("accepts_emergency")),

@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+{% block title %}Ops · HomePro Assistant{% endblock %}
+{% block head %}
+<meta name="robots" content="noindex">
+<style>
+  .wrap { width: min(1080px, calc(100% - 28px)); }
+  .top { padding: 18px 0 8px; display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; }
+  h1 { font-family: Georgia, serif; font-size: 28px; font-weight: 600; }
+  .logout { background: none; border: 0; color: var(--green-dark); font: inherit; font-weight: 700; cursor: pointer; }
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 12px 0; }
+  .metric { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 12px 14px; }
+  .metric strong { display: block; font-size: 26px; font-family: Georgia, serif; }
+  .metric span, .meta { color: var(--muted); font-size: 13px; }
+  .tabs { display: flex; gap: 8px; margin: 8px 0 12px; }
+  .tabs a, .pills a {
+    text-decoration: none; border-radius: 999px; padding: 8px 12px; font-weight: 700; font-size: 14px;
+    background: white; border: 1px solid var(--line); color: var(--ink);
+  }
+  .tabs a.on, .pills a.on { background: #e5f3eb; color: var(--green-dark); border-color: transparent; }
+  .pills { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px; display: grid; gap: 8px; }
+  .card h2 { font-size: 18px; }
+  .row { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+  .badge { display: inline-block; border-radius: 999px; padding: 3px 8px; font-size: 12px; font-weight: 700; background: var(--gray-bg); }
+  .badge.open { background: var(--amber-bg); color: var(--amber); }
+  .badge.quoted { background: #e7eef8; color: #1d4e89; }
+  .badge.booked { background: #e5f3eb; color: var(--green-dark); }
+  .badge.closed { background: var(--gray-bg); color: var(--muted); }
+  .badge.urgent { background: var(--red-bg); color: var(--red); }
+  .notice { background: #e5f3eb; border-radius: 12px; padding: 12px 14px; margin-bottom: 12px; }
+  label { display: grid; gap: 4px; font-size: 14px; font-weight: 650; }
+  input[type="text"], input[type="search"], textarea, select {
+    width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; font: inherit; background: white;
+  }
+  textarea { min-height: 72px; }
+  .filters { display: grid; grid-template-columns: 1.4fr 1fr 1fr auto; gap: 8px; align-items: end; margin-bottom: 12px; }
+  .zones { display: flex; flex-wrap: wrap; gap: 8px 14px; }
+  .zones label { font-weight: 600; display: flex; gap: 6px; align-items: center; }
+  .quote { display: grid; grid-template-columns: 1.2fr 1fr 1fr 1fr auto; gap: 8px; align-items: end; }
+  button.btn { width: auto; min-height: 44px; }
+  .pipeline { margin: 0; padding-left: 18px; }
+  @media (max-width: 800px) {
+    .metrics, .filters, .quote { grid-template-columns: 1fr; }
+  }
+</style>
+{% endblock %}
+{% block body %}
+<div class="wrap">
+  <div class="top">
+    <div>
+      <p class="eyebrow">HomePro Assistant</p>
+      <h1>Ops</h1>
+    </div>
+    <form method="post" action="/admin/logout"><button class="logout" type="submit">Log out</button></form>
+  </div>
+
+  <section class="metrics">
+    <article class="metric">
+      <span>Total jobs</span>
+      <strong>{{ metrics.total_jobs }}</strong>
+      <span>{{ metrics.open_jobs }} open, waiting on a quote</span>
+    </article>
+    <article class="metric">
+      <span>Active pros</span>
+      <strong>{{ metrics.active_pros }}</strong>
+      <span>{% for trade, count in metrics.trades %}{{ trade }} {{ count }}{% if not loop.last %} · {% endif %}{% else %}No opted-in pros{% endfor %}</span>
+    </article>
+    <article class="metric">
+      <span>Quote conversion</span>
+      <strong>{{ metrics.quote_rate }}%</strong>
+      <span>{{ metrics.quoted_jobs }} of {{ metrics.total_jobs }} jobs have a quote</span>
+    </article>
+    <article class="metric">
+      <span>Completed</span>
+      <strong>{{ metrics.completed_jobs }}</strong>
+      <span>{% if metrics.avg_ticket %}${{ metrics.avg_ticket }} avg ticket{% else %}No final prices yet{% endif %}</span>
+    </article>
+  </section>
+
+  {% if notice %}<p class="notice">{{ notice }}</p>{% endif %}
+
+  <nav class="tabs">
+    <a class="{% if tab == 'jobs' %}on{% endif %}" href="/admin?tab=jobs">Jobs</a>
+    <a class="{% if tab == 'pros' %}on{% endif %}" href="/admin?tab=pros">Pros</a>
+  </nav>
+
+  {% if tab == "jobs" %}
+  <nav class="pills">
+    {% for key, label in [("all", "All"), ("open", "Open / Waiting"), ("quoted", "Quoted"), ("booked", "Booked"), ("closed", "Completed / Closed")] %}
+    <a class="{% if status == key %}on{% endif %}" href="/admin?tab=jobs&status={{ key }}">{{ label }}</a>
+    {% endfor %}
+  </nav>
+  <div class="stack">
+    {% for job in jobs %}
+    <article class="card">
+      <div class="row">
+        <h2>{{ job.ref }} · {{ job.trade }}</h2>
+        <span class="badge {{ job.bucket }}">{{ job.bucket }}</span>
+      </div>
+      <p>{{ job.issue or "No issue summary" }}</p>
+      <p class="meta">{{ job.zip or "No ZIP" }} · {{ job.homeowner_name }} · {{ job.homeowner_phone or "No phone" }} · {{ job.created }}</p>
+      {% if job.pipeline %}
+      <ul class="pipeline">
+        {% for item in job.pipeline %}
+        <li>{{ item.name }} ({{ item.phone }}) — {{ item.label }}</li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="meta">No pros pinged yet.</p>
+      {% endif %}
+      {% if job.final_price or job.rating or job.review %}
+      <p class="meta">Paid {{ job.final_price or "—" }}{% if job.rating %} · {{ job.rating }}/5{% endif %}{% if job.review %} · {{ job.review }}{% endif %}</p>
+      {% endif %}
+      {% if job.can_quote %}
+      <form class="quote" method="post" action="/admin/jobs/{{ job.job_id }}/quote">
+        <label>Pro name<input type="text" name="name" required maxlength="80" placeholder="Ada Plumbing"></label>
+        <label>Phone<input type="text" name="phone" required maxlength="20" placeholder="7135550100"></label>
+        <label>When<input type="text" name="availability" required maxlength="200" placeholder="Today at 3pm"></label>
+        <label>Price<input type="text" name="price" required maxlength="80" placeholder="$150"></label>
+        <button class="btn btn-primary" type="submit">Add Manual Quote</button>
+      </form>
+      {% endif %}
+    </article>
+    {% else %}
+    <p class="meta">No jobs in this view.</p>
+    {% endfor %}
+  </div>
+  {% else %}
+  <form class="filters" method="get" action="/admin">
+    <input type="hidden" name="tab" value="pros">
+    <label>Search<input type="search" name="q" value="{{ query }}" placeholder="Name or phone"></label>
+    <label>Trade
+      <select name="trade">
+        <option value="">All trades</option>
+        {% for item in trade_choices %}
+        <option value="{{ item }}" {% if trade == item %}selected{% endif %}>{{ item.replace("_", " ") }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Zone
+      <select name="zone">
+        <option value="">All zones</option>
+        {% for item in zone_choices %}
+        <option value="{{ item.key }}" {% if zone == item.key %}selected{% endif %}>{{ item.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="btn btn-secondary" type="submit">Filter</button>
+  </form>
+  <div class="stack">
+    {% for pro in pros %}
+    <article class="card">
+      <div class="row">
+        <h2>{{ pro.name }}</h2>
+        <span class="badge {% if pro.paused %}closed{% else %}booked{% endif %}">{% if pro.paused %}Paused{% else %}Active{% endif %}</span>
+      </div>
+      <p>{{ pro.display_phone }} · {{ pro.trades | join(", ") }}</p>
+      <p class="meta">
+        {% if pro.emergency %}<span class="badge urgent">Takes urgent calls</span>{% else %}<span class="badge">Scheduled</span>{% endif %}
+        {{ pro.lead }} · {{ pro.fee }} · {{ pro.zones | join(", ") }}
+      </p>
+      <p class="meta">Onboarding: {{ pro.onboarding }}</p>
+      <form method="post" action="/admin/pros/{{ pro.phone }}/status">
+        <input type="hidden" name="paused" value="{{ '0' if pro.paused else '1' }}">
+        <button class="btn btn-quiet" type="submit">{% if pro.paused %}Activate{% else %}Pause{% endif %}</button>
+      </form>
+      <form class="stack" method="post" action="/admin/pros/{{ pro.phone }}/profile">
+        <label>Notes<textarea name="notes" maxlength="500">{{ pro.notes }}</textarea></label>
+        <div class="zones">
+          {% for item in zone_choices %}
+          <label><input type="checkbox" name="zones" value="{{ item.key }}" {% if item.key in pro.zone_keys %}checked{% endif %}> {{ item.label }}</label>
+          {% endfor %}
+        </div>
+        <button class="btn btn-secondary" type="submit">Save notes and zones</button>
+      </form>
+    </article>
+    {% else %}
+    <p class="meta">No pros match that filter.</p>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

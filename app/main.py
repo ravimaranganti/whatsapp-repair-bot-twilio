@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.config import settings
 from app.portal_routes import router as portal_router
+from app.admin_routes import router as admin_router
 from app.models import MessageContent
 from app.services.agent import process_message
 from app.services.idempotency import already_processed, mark_processed
@@ -67,6 +68,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(portal_router)
+app.include_router(admin_router)
 
 
 def _webhook_url(request: Request) -> str:
@@ -123,6 +125,7 @@ async def handle_webhook(
     ButtonText: Optional[str] = Form(None),
     ListId: Optional[str] = Form(None),
     InteractiveData: Optional[str] = Form(None),
+    FlowData: Optional[str] = Form(None),
     x_twilio_signature: Optional[str] = Header(None, alias="X-Twilio-Signature"),
 ):
     """Validate, dedupe, enqueue, return 200 immediately (empty body / TwiML)."""
@@ -156,7 +159,7 @@ async def handle_webhook(
     if interaction.kind == "media" and interaction.media_url:
         content_type = (interaction.media_content_type or "").lower()
         msg_type = "video" if "video" in content_type else "image"
-    elif interaction.kind in {"quick_reply", "list_picker"}:
+    elif interaction.kind in {"quick_reply", "list_picker", "flow"}:
         msg_type = "interactive"
     elif interaction.text or Body.strip():
         msg_type = "text"
@@ -174,7 +177,7 @@ async def handle_webhook(
         button_payload=interaction.payload or ButtonPayload,
         button_text=ButtonText,
         list_id=ListId,
-        interactive_data=InteractiveData,
+        interactive_data=InteractiveData or FlowData,
     )
 
     await mark_processed(MessageSid, sender)
@@ -282,10 +285,13 @@ async def tasks_weekly_digest():
 
 
 @app.post("/admin/seed-pros")
-async def admin_seed_pros():
-    """One-shot seed from professionals.json (opted_in=False). Protect in production."""
+async def admin_seed_pros(request: Request):
+    """One-shot seed from professionals.json (opted_in=False)."""
+    from app.services.admin_auth import admin_password, request_ok
     from app.services.pros import seed_pros_from_json
 
+    if not admin_password() or not request_ok(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
     n = await seed_pros_from_json()
     return {"seeded": n}
 

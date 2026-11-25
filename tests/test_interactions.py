@@ -49,6 +49,19 @@ def test_media_image():
     assert i.text == "leaking"
 
 
+def test_flow_submission_is_not_a_button_payload():
+    i = parse_interaction(
+        {
+            "Body": "Sent",
+            "InteractiveData": '{"selected_trades":["plumbing"],"selected_zones":["katy"]}',
+            "NumMedia": "0",
+        }
+    )
+    assert i.kind == "flow"
+    assert i.payload == ""
+    assert i.text == "Sent"
+
+
 def test_empty_unknown():
     i = parse_interaction({"NumMedia": 0, "Body": ""})
     assert i.kind == "unknown"
