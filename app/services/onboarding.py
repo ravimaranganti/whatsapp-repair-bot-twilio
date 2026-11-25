@@ -313,7 +313,14 @@ def interpret_trade_turn(
 
 
 async def _send_trade_picker(phone: str) -> None:
-    """Text list. The saved WhatsApp list still has painting, pool, and lawn as rows."""
+    """In-session list. Falls back to text if the Content SID is missing."""
+    sid = (settings.tpl_pro_trades_sid or "").strip()
+    if sid:
+        try:
+            await whatsapp_service.send_content_template(phone, content_sid=sid)
+            return
+        except Exception as e:
+            logger.warning("pro trades list failed: %s", e)
     lines = "\n".join(f"- {label}" for _key, label in TRADE_CHOICES)
     await whatsapp_service.send_text_message(
         phone,

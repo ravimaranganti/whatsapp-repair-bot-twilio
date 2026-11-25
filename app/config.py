@@ -146,7 +146,7 @@ class Settings(BaseSettings):
     )
     tpl_pro_trades_extra_sid: str = Field(
         default="",
-        description="In-session button for mobile auto repair. The main trade list is full.",
+        description="Unused. Mobile mechanic is a row on the main trade list.",
     )
     tpl_pro_language_sid: str = Field(
         default="",
