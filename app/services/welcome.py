@@ -343,6 +343,7 @@ def decide(
     pending_count: int = 0,
     opted_in: bool = False,
     join_code: str = "",
+    flow_reply: bool = False,
 ) -> WelcomeDecision:
     """Pure routing for the welcome flow. passthrough means the normal pipeline continues."""
     mode = mode or MODE_IDLE
@@ -383,7 +384,13 @@ def decide(
     ):
         return WelcomeDecision("create_homeowner_and_continue", clear_state=True)
 
-    if mode in IN_PROGRESS_MODES and (is_help(text) or is_greeting_or_vague(text)):
+    if flow_reply:
+        return WelcomeDecision("passthrough")
+
+    if mode in IN_PROGRESS_MODES and (
+        is_help(text)
+        or (is_greeting_or_vague(text) and not (payload or "").strip() and not flow_reply)
+    ):
         kind = "midflow_help" if is_help(text) else "midflow_status"
         return WelcomeDecision(
             kind,
@@ -601,6 +608,12 @@ async def handle_welcome(message: Any, phone: str, state: dict) -> bool:
         pending_count=len(loaded["pending"]),
         opted_in=bool((loaded["pro"] or {}).get("opted_in")),
         join_code=settings.pro_join_code or "",
+        flow_reply=bool((getattr(message, "interactive_data", None) or "").strip())
+        or (
+            (message.type or "") == "interactive"
+            and not (message.body or "").strip()
+            and not (message.button_payload or "").strip()
+        ),
     )
     if decision.action == "passthrough":
         return False

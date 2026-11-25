@@ -43,6 +43,37 @@ def test_flow_reply_keeps_other_for_the_follow_up():
     assert pick.zones == ["all"]
 
 
+def test_twilio_page_shape_and_nested_reply():
+    pages = {
+        "pages": [
+            {
+                "pageId": "SELECT_TRADES",
+                "items": [{"label": "Services", "value": '["plumbing"]'}],
+            },
+            {
+                "pageId": "SELECT_ZONES",
+                "items": [{"label": "Areas", "value": "all"}],
+            },
+        ]
+    }
+    pick = parse_flow_submission(pages)
+    assert pick is not None and pick.ok
+    assert pick.trades == ["plumbing"]
+    assert pick.zones == ["all"]
+    nested = {
+        "interactive": {
+            "nfm_reply": {
+                "response_json": '{"selected_trades":["hvac"],"selected_zones":["sugar_land"]}',
+                "body": "Sent",
+            }
+        }
+    }
+    nested_pick = parse_flow_submission(nested)
+    assert nested_pick is not None
+    assert nested_pick.trades == ["hvac"]
+    assert nested_pick.zones == ["sugar_land"]
+
+
 def test_page_payload_uses_the_same_ids():
     raw = {
         "pages": [

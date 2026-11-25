@@ -32,6 +32,13 @@ def _d(**kwargs):
     return decide(**base)
 
 
+def test_blank_flow_reply_is_not_treated_as_a_greeting():
+    from app.models import MODE_PRO_ONBOARDING
+
+    decision = _d(role="pro", mode=MODE_PRO_ONBOARDING, text="", flow_reply=True)
+    assert decision.action == "passthrough"
+
+
 def test_unknown_greeting_shows_welcome():
     for text in ("hi", "hello", "hey", "start", "what is this", "👋"):
         decision = _d(text=text)

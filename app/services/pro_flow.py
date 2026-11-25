@@ -129,14 +129,60 @@ def _unwrap(raw: Any) -> dict[str, Any] | None:
             raw = json.loads(text)
         except json.JSONDecodeError:
             return None
+        if isinstance(raw, str):
+            return _unwrap(raw)
+    if isinstance(raw, list):
+        return {"pages": raw}
     if not isinstance(raw, dict):
         return None
-    reply = raw.get("nfm_reply") or raw.get("nfmReply")
-    if isinstance(reply, dict):
-        nested = reply.get("response_json") or reply.get("responseJson")
-        if nested:
-            return _unwrap(nested)
+    for key in ("interactive", "nfm_reply", "nfmReply", "flow_data", "FlowData"):
+        nested = raw.get(key)
+        if isinstance(nested, (dict, str)):
+            inner = _unwrap(nested)
+            if inner and inner is not raw:
+                raw = {**raw, **inner}
+    reply = raw.get("response_json") or raw.get("responseJson")
+    if isinstance(reply, (dict, str)):
+        inner = _unwrap(reply)
+        if inner:
+            raw = {**raw, **inner}
     return raw
+
+
+def _collect_flow_values(node: Any, bag: dict[str, list[str]], page_id: str = "") -> None:
+    """Pull checkbox values out of Twilio's page payload or Meta's response_json."""
+    if isinstance(node, str):
+        text = node.strip()
+        if text.startswith("{") or text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                return
+            _collect_flow_values(parsed, bag, page_id)
+        return
+    if isinstance(node, list):
+        for item in node:
+            _collect_flow_values(item, bag, page_id)
+        return
+    if not isinstance(node, dict):
+        return
+    current = str(node.get("id") or node.get("page_id") or node.get("pageId") or page_id)
+    name = str(node.get("name") or "")
+    label = str(node.get("label") or "").lower()
+    if "value" in node:
+        target = ""
+        if name == "selected_trades" or current == TRADE_PAGE or "service" in label:
+            target = "selected_trades"
+        elif name == "selected_zones" or current == ZONE_PAGE or "area" in label:
+            target = "selected_zones"
+        if target:
+            bag[target].extend(_as_list(node.get("value")))
+    for key in ("selected_trades", "selected_zones"):
+        if key in node:
+            bag[key].extend(_as_list(node.get(key)))
+    for value in node.values():
+        if isinstance(value, (dict, list, str)):
+            _collect_flow_values(value, bag, current)
 
 
 def _map_token(token: str, labels: dict[str, str]) -> str:
@@ -166,44 +212,11 @@ def parse_flow_submission(raw: Any) -> ProfilePick | None:
     data = _unwrap(raw)
     if not data:
         return None
-    trades_raw: list[str] = []
-    zones_raw: list[str] = []
-    saw_flow = False
-    if "selected_trades" in data or "selected_zones" in data:
-        saw_flow = True
-        trades_raw.extend(_as_list(data.get("selected_trades")))
-        zones_raw.extend(_as_list(data.get("selected_zones")))
-    pages = data.get("pages") or []
-    if isinstance(pages, list):
-        for page in pages:
-            if not isinstance(page, dict):
-                continue
-            page_id = str(page.get("id") or page.get("page_id") or page.get("pageId") or "")
-            if page_id not in {TRADE_PAGE, ZONE_PAGE}:
-                continue
-            saw_flow = True
-            values: list[str] = []
-            items = page.get("items") or page.get("layout") or []
-            if isinstance(items, dict):
-                items = [items]
-            if isinstance(items, list):
-                for item in items:
-                    if isinstance(item, dict):
-                        name = str(item.get("name") or "")
-                        if name == "selected_trades":
-                            trades_raw.extend(_as_list(item.get("value")))
-                            continue
-                        if name == "selected_zones":
-                            zones_raw.extend(_as_list(item.get("value")))
-                            continue
-                        values.extend(_as_list(item.get("value")))
-                    elif isinstance(item, str):
-                        values.append(item)
-            if page_id == TRADE_PAGE:
-                trades_raw.extend(values)
-            else:
-                zones_raw.extend(values)
-    if not saw_flow:
+    bag: dict[str, list[str]] = {"selected_trades": [], "selected_zones": []}
+    _collect_flow_values(data, bag)
+    trades_raw = bag["selected_trades"]
+    zones_raw = bag["selected_zones"]
+    if not trades_raw and not zones_raw:
         return None
 
     trades: list[str] = []
