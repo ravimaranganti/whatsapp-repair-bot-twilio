@@ -188,6 +188,7 @@ async def process_message(message: MessageContent, sender: str):
                 "awaiting_quote_question",
                 "awaiting_new_issue_confirm",
                 "awaiting_job_feedback",
+                "awaiting_urgency",
             }
             or homeowner_payload == "show_options"
             or homeowner_payload.startswith("show_options:")

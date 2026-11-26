@@ -312,6 +312,24 @@ async def _apply_homeowner_tap(
         await _reopen_fell_through(phone, job)
         return True
 
+    if tap.action in {"urgency_today", "urgency_flexible"}:
+        if job.get("state") != "awaiting_consent":
+            await _already_updated(phone, tap.job_id)
+            return True
+        diagnosis = Diagnosis.model_validate(job.get("diagnosis") or ctx.get("diagnosis"))
+        await dispatch_job(
+            phone,
+            {
+                "diagnosis": diagnosis.model_dump(mode="json"),
+                "photo_url": job.get("photo_url"),
+                "area_zip": job.get("area_zip"),
+                "job_id": tap.job_id,
+                "active_job_id": tap.job_id,
+                "is_urgent": tap.action == "urgency_today",
+            },
+        )
+        return True
+
     if tap.action == "confirm_job":
         if job.get("state") != "awaiting_consent":
             await _already_updated(phone, tap.job_id)
@@ -836,7 +854,48 @@ async def handle_homeowner_state(
         await _finalize_assignment(phone_n, job_id, pro_phone, share_notes=share)
         return True
 
+    if mode == "awaiting_urgency":
+        if low in {"urgent", "today", "urgent today", "1"}:
+            choice = True
+        elif low in {"flexible", "next few days", "later", "2"}:
+            choice = False
+        else:
+            await whatsapp_service.send_text_message(
+                phone_n,
+                "Reply *Urgent* for today, or *Flexible* for the next few days.",
+            )
+            return True
+        ctx["is_urgent"] = choice
+        await dispatch_job(phone_n, ctx)
+        return True
+
     return False
+
+
+async def _ask_urgency(phone: str, job_id: str, issue: str, ctx: dict[str, Any]) -> None:
+    from app.services.job_escalation import urgency_prompt
+
+    await conversation_state_store.set(
+        phone,
+        "awaiting_urgency",
+        {**ctx, "job_id": job_id, "active_job_id": job_id},
+    )
+    prompt = urgency_prompt(issue)
+    try:
+        await whatsapp_service.send_session_buttons(
+            phone,
+            prompt,
+            [
+                (f"urgency:today:{job_id}", "Urgent (Today)"),
+                (f"urgency:flexible:{job_id}", "Next few days"),
+            ],
+        )
+    except Exception as exc:
+        logger.warning("urgency buttons failed for %s: %s", job_id, exc)
+        await whatsapp_service.send_text_message(
+            phone,
+            f"{prompt}\n\nReply *Urgent* for today, or *Flexible* for the next few days.",
+        )
 
 
 async def dispatch_job(phone: str, ctx: dict[str, Any]) -> None:
@@ -867,6 +926,26 @@ async def dispatch_job(phone: str, ctx: dict[str, Any]) -> None:
         return
     await homeowner_store.update(phone_n, active_job_id=job_id)
 
+    issue_text = diag.pro_brief.issue or ""
+    if "is_urgent" in ctx:
+        urgent = bool(ctx.get("is_urgent"))
+        await job_store.update_fields(job_id, is_urgent=urgent)
+        job["is_urgent"] = urgent
+    elif "is_urgent" not in job:
+        await _ask_urgency(
+            phone_n,
+            job_id,
+            issue_text,
+            {
+                "diagnosis": diag.model_dump(mode="json"),
+                "photo_url": ctx.get("photo_url"),
+                "area_zip": area_zip,
+            },
+        )
+        return
+    else:
+        urgent = bool(job.get("is_urgent"))
+
     if not settings.dispatch_enabled:
         await job_store.set_state(job_id, "cancelled")
         await homeowner_store.update(phone_n, active_job_id=None)
@@ -892,7 +971,9 @@ async def dispatch_job(phone: str, ctx: dict[str, Any]) -> None:
 
     await job_store.set_state(job_id, "dispatched")
 
-    issue = diag.pro_brief.issue
+    issue = (diag.pro_brief.issue or "").strip() or "home repair"
+    if urgent:
+        issue = f"[URGENT] {issue}"
     alerted: list[str] = []
     for p in pros:
         sent = await _send_job_alert(
@@ -904,7 +985,13 @@ async def dispatch_job(phone: str, ctx: dict[str, Any]) -> None:
         await pro_store.push_pending_alert(p["phone"], job_id)
         alerted.append(normalize_phone(p["phone"]))
 
-    await job_store.update_fields(job_id, alerted_pro_phones=alerted)
+    from datetime import datetime, timezone
+
+    await job_store.update_fields(
+        job_id,
+        alerted_pro_phones=alerted,
+        dispatched_at=datetime.now(timezone.utc).isoformat(),
+    )
     if not alerted:
         await job_store.set_state(job_id, "cancelled")
         await homeowner_store.update(phone_n, active_job_id=None)
@@ -926,8 +1013,12 @@ async def dispatch_job(phone: str, ctx: dict[str, Any]) -> None:
         role="system",
         type="job_dispatched",
         job_id=job_id,
-        payload={"pro_count": len(alerted), "trade": trade},
+        payload={"pro_count": len(alerted), "trade": trade, "is_urgent": urgent},
     )
+    if urgent:
+        from app.services.job_escalation import _alert_founder
+
+        await _alert_founder(job, headline="Urgent ticket")
 
     # Schedule collection window via Cloud Tasks if configured
     try:

@@ -20,7 +20,17 @@ logger = logging.getLogger(__name__)
 REASSURE_AFTER = timedelta(minutes=15)
 FOUNDER_AFTER = timedelta(minutes=30)
 CHOICE_AFTER = timedelta(minutes=60)
+URGENT_AFTER = timedelta(minutes=10)
 _ENGAGED = frozenset({"viewed", "interested", "details_given", "selected"})
+_URGENT_MARKERS = (
+    "flooding",
+    "burst pipe",
+    "active leak",
+    "gas smell",
+    "sparks",
+    "no ac",
+    "no a/c",
+)
 
 
 def _aware(ts: datetime) -> datetime:
@@ -34,6 +44,17 @@ def issue_summary(job: dict[str, Any]) -> str:
     brief = diagnosis.get("pro_brief") if isinstance(diagnosis.get("pro_brief"), dict) else {}
     text = " ".join(str(brief.get("issue") or "").split())
     return text or "home repair"
+
+
+def looks_urgent(*parts: str) -> bool:
+    text = " ".join(part for part in parts if part).lower().replace("a/c", "ac")
+    return any(marker.replace("a/c", "ac") in text for marker in _URGENT_MARKERS)
+
+
+def urgency_prompt(*parts: str) -> str:
+    if looks_urgent(*parts):
+        return "This sounds urgent. How urgent is this repair?"
+    return "How urgent is this repair?"
 
 
 def has_pro_response(responses: list[dict[str, Any]]) -> bool:
@@ -52,10 +73,14 @@ def due_stage(
         return None
     if has_pro_response(responses):
         return "stop"
-    created = parse_timestamp(job.get("created_at"))
+    created = parse_timestamp(job.get("dispatched_at") or job.get("created_at"))
     if created is None:
         return None
     age = _aware(now) - _aware(created)
+    if job.get("is_urgent"):
+        if age >= URGENT_AFTER and not job.get("escalation_urgent_sent"):
+            return "urgent_places"
+        return None
     if age >= REASSURE_AFTER and not job.get("escalation_15_sent"):
         return "reassure"
     if age >= FOUNDER_AFTER and not job.get("escalation_30_sent"):
@@ -74,15 +99,43 @@ def reassure_body(trade: str) -> str:
     )
 
 
-def founder_body(job: dict[str, Any]) -> str:
+def founder_body(job: dict[str, Any], *, headline: str = "Unanswered ticket") -> str:
     job_id = str(job.get("job_id") or "")
     return (
-        f"Unanswered ticket {job_ref(job_id)}\n"
+        f"{headline} {job_ref(job_id)}\n"
         f"Trade: {job.get('trade') or 'repair'}\n"
         f"ZIP: {job.get('area_zip') or 'unknown'}\n"
         f"Summary: {issue_summary(job)}\n"
         f"Homeowner: {job.get('homeowner_phone') or 'unknown'}"
     )
+
+
+def urgent_places_message(trade: str, places: list[dict[str, Any]]) -> str:
+    label = trade_phrase(trade)
+    lead = (
+        f"Because this is urgent and our network pros haven't confirmed availability "
+        f"in the last 10 minutes, here are 3 top-rated local {label} companies you can "
+        "call immediately—we'll also let you know if one of our vetted pros responds shortly."
+    )
+    if not places:
+        return (
+            f"{lead}\n\nI couldn't find a public listing at 4.6 stars with 30 reviews yet. "
+            "I'll still message you if one of our pros responds."
+        )
+    lines = [lead, ""]
+    for index, place in enumerate(places[:3], start=1):
+        rating = place.get("rating")
+        try:
+            reviews = int(place.get("reviews") or 0)
+        except (TypeError, ValueError):
+            reviews = 0
+        try:
+            stars = f"{float(rating):.1f}★ · {reviews} reviews"
+        except (TypeError, ValueError):
+            stars = f"{reviews} reviews"
+        lines.append(f"{index}. *{place.get('name') or 'Local company'}* ({stars})")
+        lines.append(f"   📞 {place.get('phone') or 'phone not listed'}")
+    return "\n".join(lines)
 
 
 def choice_body() -> str:
@@ -138,6 +191,7 @@ async def run_unanswered_escalations(now: datetime | None = None) -> dict[str, i
     reassured = 0
     founders = 0
     choices = 0
+    urgent = 0
     stopped = 0
     for job in await job_store.list_in_states({"dispatched"}):
         job_id = str(job.get("job_id") or "")
@@ -160,10 +214,15 @@ async def run_unanswered_escalations(now: datetime | None = None) -> dict[str, i
         if stage == "choice" and await _ask_homeowner(job):
             await job_store.update_fields(job_id, escalation_60_sent=True)
             choices += 1
+            continue
+        if stage == "urgent_places" and await _send_urgent_places(job):
+            await job_store.update_fields(job_id, escalation_urgent_sent=True)
+            urgent += 1
     return {
         "processedEscalation15": reassured,
         "processedEscalation30": founders,
         "processedEscalation60": choices,
+        "processedEscalationUrgent": urgent,
         "processedEscalationStopped": stopped,
     }
 
@@ -231,14 +290,14 @@ async def _remind_silent_pros(job: dict[str, Any], responses: list[dict[str, Any
             logger.warning("pro reminder failed for job %s: %s", job_id, exc)
 
 
-async def _alert_founder(job: dict[str, Any]) -> bool:
+async def _alert_founder(job: dict[str, Any], *, headline: str = "Unanswered ticket") -> bool:
     from app.services.events import log_event
     from app.services.session_window import get_last_inbound, window_is_open
     from app.services.whatsapp import whatsapp_service
     from app.utils.phones import to_e164
 
     phone = founder_destination()
-    body = founder_body(job)
+    body = founder_body(job, headline=headline)
     if not phone:
         logger.error("FOUNDER_ALERT_PHONE is empty; unanswered job %s", job.get("job_id"))
         await log_event(
@@ -299,5 +358,26 @@ async def _ask_homeowner(job: dict[str, Any]) -> bool:
             )
     except Exception as exc:
         logger.warning("60-minute choice failed for %s: %s", job_id, exc)
+        return False
+    return True
+
+
+async def _send_urgent_places(job: dict[str, Any]) -> bool:
+    from app.services.places import search_local_specialists
+    from app.services.whatsapp import whatsapp_service
+    from app.utils.phones import to_e164
+
+    homeowner = str(job.get("homeowner_phone") or "")
+    if not homeowner:
+        return False
+    trade = str(job.get("trade") or "repair")
+    area_zip = str(job.get("area_zip") or "")
+    places = await search_local_specialists(trade, area_zip) if area_zip else []
+    try:
+        await whatsapp_service.send_text_message(
+            to_e164(homeowner), urgent_places_message(trade, places)
+        )
+    except Exception as exc:
+        logger.warning("urgent places fallback failed for %s: %s", job.get("job_id"), exc)
         return False
     return True
