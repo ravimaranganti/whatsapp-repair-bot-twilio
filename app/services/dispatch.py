@@ -35,7 +35,13 @@ from app.services.homeowner_followups import (
     quote_reminder_body,
 )
 from app.services.homeowners import homeowner_store
-from app.services.jobs import job_store, resolve_pro_from_pick_payload
+from app.services.jobs import (
+    OPEN_JOB_LIMIT_REPLY,
+    OPEN_JOB_STATES,
+    at_open_job_limit,
+    job_store,
+    resolve_pro_from_pick_payload,
+)
 from app.services.alert_reply import job_ref, resolve_alert_reply
 from app.services.matching import select_pros_for_job
 from app.services.places import (
@@ -159,10 +165,21 @@ async def after_diagnosis(
     await _start_consent_flow(phone_n, diagnosis, photo_url)
 
 
+async def _blocked_by_open_jobs(phone: str) -> bool:
+    """True when this homeowner already has 3 unbooked requests. Sends the reply."""
+    open_jobs = await job_store.list_for_homeowner(phone, set(OPEN_JOB_STATES))
+    if not at_open_job_limit(len(open_jobs)):
+        return False
+    await whatsapp_service.send_text_message(phone, OPEN_JOB_LIMIT_REPLY)
+    return True
+
+
 async def _start_consent_flow(
     phone: str, diagnosis: Diagnosis, photo_url: str | None
 ) -> None:
     ho = await homeowner_store.ensure(phone)
+    if await _blocked_by_open_jobs(phone):
+        return
     active = ho.get("active_job_id")
     if active:
         job = await job_store.get_job(active)
@@ -220,9 +237,28 @@ async def _start_consent_flow(
     )
 
 
+async def _start_text_issue(phone: str, summary: str) -> None:
+    """Turn a written description into a normal pro request, using the saved ZIP."""
+    from app.services.gemini import gemini_service
+
+    try:
+        diagnosis = await gemini_service.analyze_text(summary, phone=phone)
+    except Exception:
+        logger.exception("text diagnosis failed")
+        await whatsapp_service.send_text_message(
+            phone,
+            "Tell me a little more about what it's doing and I'll line up the right pro.",
+        )
+        return
+    await _start_consent_flow(phone, diagnosis, None)
+
+
 async def _ask_dispatch_consent(
     phone: str, diagnosis: Diagnosis, photo_url: str | None, area_zip: str
 ) -> None:
+    if await _blocked_by_open_jobs(phone):
+        await conversation_state_store.clear(phone)
+        return
     trade = diagnosis.trade.value
     job = await job_store.create_job(
         homeowner_phone=phone,
@@ -713,6 +749,9 @@ async def handle_homeowner_state(
             )
             return True
         if yes:
+            if ctx.get("pending_summary") and not ctx.get("diagnosis"):
+                await _start_text_issue(phone_n, str(ctx.get("pending_summary") or ""))
+                return True
             await dispatch_job(phone_n, ctx)
             return True
         from app.services.homeowner_profile import remember_homeowner, zip_only_update
@@ -785,6 +824,8 @@ async def dispatch_job(phone: str, ctx: dict[str, Any]) -> None:
     job_id = str(ctx.get("job_id") or ctx.get("active_job_id") or "")
     job = await job_store.get_job(job_id) if job_id else None
     if not job:
+        if await _blocked_by_open_jobs(phone_n):
+            return
         job = await job_store.create_job(
             homeowner_phone=phone_n,
             diagnosis=diag,
@@ -1824,6 +1865,7 @@ async def maybe_update_saved_zip(phone: str, body: str) -> bool:
         remember_homeowner,
         saved_zip,
         zip_only_update,
+        zip_reply_effect,
     )
 
     phone_n = normalize_phone(phone)
@@ -1835,28 +1877,23 @@ async def maybe_update_saved_zip(phone: str, body: str) -> bool:
         return False
     _, first = parse_zip_and_name(body or "")
     previous = saved_zip(ho)
-    await remember_homeowner(phone_n, zip_code=changed, first_name=first or None)
     job_id = str(ho.get("active_job_id") or "")
     job = await job_store.get_job(job_id) if job_id else None
     state = (job or {}).get("state")
-    if job and state in {"diagnosed", "awaiting_consent"}:
+    effect = zip_reply_effect(previous, changed, state if job else None)
+    if effect == "continue":
+        return False
+    await remember_homeowner(phone_n, zip_code=changed, first_name=first or None)
+    if effect == "update_job" and job:
         await job_store.update_fields(job_id, area_zip=changed)
         await whatsapp_service.send_text_message(
             phone_n, f"Updated. I'll match this request near *{changed}*."
         )
         return True
-    if job and state in {"dispatched", "awaiting_pick"} and previous and previous != changed:
+    if effect == "already_out":
         await whatsapp_service.send_text_message(
             phone_n,
             f"Saved *{changed}* for next time. This request already went out near *{previous}*.",
         )
         return True
-    if previous == changed:
-        await whatsapp_service.send_text_message(
-            phone_n, f"Still matching near *{changed}*."
-        )
-        return True
-    await whatsapp_service.send_text_message(
-        phone_n, f"Saved *{changed}*. Send a photo when you need a pro."
-    )
-    return True
+    return False

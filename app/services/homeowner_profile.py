@@ -85,6 +85,42 @@ def saved_zip(homeowner: dict[str, Any] | None) -> str:
     return str(data.get("zip_code") or data.get("area_zip") or "").strip()
 
 
+def zip_reply_effect(previous: str, changed: str, state: str | None) -> str:
+    """How a ZIP-only reply should affect an existing request.
+
+    continue — same ZIP, so the chat should keep going instead of dead-ending.
+    update_job — the request has not gone out yet.
+    already_out — a different ZIP arrived after pros were already contacted.
+    save_only — remember it and let the chat respond.
+    """
+    if state in {"diagnosed", "awaiting_consent"}:
+        return "update_job"
+    if state in {"dispatched", "awaiting_pick"} and previous and previous != changed:
+        return "already_out"
+    if previous == changed:
+        return "continue"
+    return "save_only"
+
+
+def chat_profile_note(homeowner: dict[str, Any] | None, job: dict[str, Any] | None) -> str:
+    """Facts the chat needs so it does not re-ask for a ZIP or ignore an open request."""
+    data = homeowner or {}
+    zip_code = saved_zip(data)
+    lines = [f"Saved ZIP: {zip_code or 'none'}"]
+    name = saved_first_name(data)
+    if name:
+        lines.append(f"First name: {name}")
+    if job:
+        lines.append(
+            "Active request: "
+            f"{job.get('trade') or 'repair'} ({job.get('state') or 'open'}) "
+            f"near {job.get('area_zip') or zip_code or 'unknown ZIP'}"
+        )
+    else:
+        lines.append("Active request: none")
+    return "\n".join(lines)
+
+
 def saved_first_name(homeowner: dict[str, Any] | None) -> str:
     data = homeowner or {}
     first = " ".join(str(data.get("first_name") or "").split())

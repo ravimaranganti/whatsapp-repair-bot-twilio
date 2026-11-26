@@ -42,6 +42,26 @@ ACTIVE_STATES = frozenset(
     }
 )
 
+# Unbooked requests still waiting on a quote or a homeowner decision.
+# `assigned` is already booked, so it does not count toward the cap.
+OPEN_JOB_STATES = frozenset(
+    {
+        "diagnosed",
+        "awaiting_consent",
+        "dispatched",
+        "awaiting_pick",
+    }
+)
+OPEN_JOB_LIMIT = 3
+OPEN_JOB_LIMIT_REPLY = (
+    "You currently have 3 open requests waiting on quotes. "
+    "Please book, pass, or close one of your existing requests before starting a new one."
+)
+
+
+def at_open_job_limit(count: int) -> bool:
+    return count >= OPEN_JOB_LIMIT
+
 
 class InvalidTransition(Exception):
     def __init__(self, from_state: str, to_state: str):

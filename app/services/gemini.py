@@ -16,6 +16,7 @@ from google.genai import types
 
 from app.config import settings
 from app.models.diagnosis import Diagnosis
+from app.services.inbound_guard import cap_text
 from app.prompts.persona import BASE_PERSONA, CHAT_INSTRUCTIONS, DIAGNOSIS_INSTRUCTIONS
 from app.services.chat_tools import TOOL_DECLARATIONS, execute_tool
 from app.services.events import log_event
@@ -25,6 +26,13 @@ logger = logging.getLogger(__name__)
 
 GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_TIMEOUT_SECONDS = 50
+MAX_OUTPUT_TOKENS = 800
+
+
+def generation_config(**kwargs: Any) -> types.GenerateContentConfig:
+    """Every Gemini call caps its output so a reply cannot run long."""
+    kwargs.setdefault("max_output_tokens", MAX_OUTPUT_TOKENS)
+    return types.GenerateContentConfig(**kwargs)
 
 
 def _diagnosis_schema() -> dict[str, Any]:
@@ -83,6 +91,7 @@ class GeminiService:
         phone: str | None = None,
     ) -> Diagnosis:
         """Multimodal diagnosis → Diagnosis (with safety overrides). Retries once on parse failure."""
+        user_message = cap_text(user_message or "")
         ctx = self._context_block(prior_turns, memory_facts, service_notes)
         caption = f"\nUser caption: {user_message}" if user_message else ""
         prompt_text = (
@@ -103,7 +112,7 @@ class GeminiService:
                         self.client.models.generate_content,
                         model=GEMINI_MODEL,
                         contents=contents,
-                        config=types.GenerateContentConfig(
+                        config=generation_config(
                             system_instruction=system,
                             response_mime_type="application/json",
                             response_schema=Diagnosis,
@@ -148,21 +157,57 @@ class GeminiService:
 
         raise RuntimeError(f"Diagnosis failed after retries: {last_err}")
 
+    async def analyze_text(self, description: str, *, phone: str | None = None) -> Diagnosis:
+        """Diagnosis from a written description, after the homeowner has answered a follow-up."""
+        description = cap_text(description or "")
+        prompt_text = (
+            "The homeowner described this problem in text. There is no photo. "
+            "Return Diagnosis JSON. Set diy_appropriate false unless this is clearly "
+            "a simple fix they can do themselves. Put a one-sentence pro_brief.issue "
+            "a local pro could act on.\n\n"
+            f"Description: {description}"
+        )
+        system = f"{BASE_PERSONA}\n{DIAGNOSIS_INSTRUCTIONS}"
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                self.client.models.generate_content,
+                model=GEMINI_MODEL,
+                contents=prompt_text,
+                config=generation_config(
+                    system_instruction=system,
+                    response_mime_type="application/json",
+                    response_schema=Diagnosis,
+                ),
+            ),
+            timeout=GEMINI_TIMEOUT_SECONDS,
+        )
+        diagnosis = apply_safety_overrides(Diagnosis.model_validate_json(response.text or ""))
+        await log_event(
+            phone=phone,
+            role="system",
+            type="gemini_call",
+            payload={"mode": "text_diagnosis", "model": GEMINI_MODEL, "trade": diagnosis.trade.value},
+        )
+        return diagnosis
+
     async def chat_reply(
         self,
         prior_turns: list[dict[str, str]],
         user_message: str,
         memory_facts: list[str] | None = None,
         service_notes: list[str] | None = None,
+        profile_note: str | None = None,
         *,
         phone: str | None = None,
     ) -> str:
         """Multi-turn chat with optional function calling."""
-        user_message = (user_message or "").strip()
+        user_message = cap_text((user_message or "").strip())
         if not user_message:
             return "Send me a message or a photo of the issue and I will help."
 
         system = f"{BASE_PERSONA}\n{CHAT_INSTRUCTIONS}"
+        if profile_note:
+            system += "\n\nHomeowner profile:\n" + profile_note
         if service_notes:
             system += "\n\nKnown service notes:\n" + "\n".join(
                 f"- {n}" for n in service_notes[:15]
@@ -209,7 +254,7 @@ class GeminiService:
                     self.client.models.generate_content,
                     model=GEMINI_MODEL,
                     contents=contents,
-                    config=types.GenerateContentConfig(
+                    config=generation_config(
                         system_instruction=system,
                         tools=tools,
                     ),
@@ -254,7 +299,7 @@ class GeminiService:
                     self.client.models.generate_content,
                     model=GEMINI_MODEL,
                     contents=contents,
-                    config=types.GenerateContentConfig(
+                    config=generation_config(
                         system_instruction=system,
                         tools=tools,
                     ),
@@ -344,7 +389,7 @@ class GeminiService:
                 self.client.models.generate_content,
                 model=GEMINI_MODEL,
                 contents=prompt,
-                config=types.GenerateContentConfig(
+                config=generation_config(
                     system_instruction=(
                         "You extract structured quote details from a professional's "
                         "short WhatsApp message. Return only the requested JSON."
@@ -381,7 +426,7 @@ class GeminiService:
                 self.client.models.generate_content,
                 model=GEMINI_MODEL,
                 contents=prompt,
-                config=types.GenerateContentConfig(
+                config=generation_config(
                     system_instruction=(
                         "You extract a price and a rating from a short homeowner note. "
                         "Return only the requested JSON."
@@ -416,7 +461,7 @@ class GeminiService:
                 self.client.models.generate_content,
                 model=GEMINI_MODEL,
                 contents=prompt,
-                config=types.GenerateContentConfig(
+                config=generation_config(
                     system_instruction=BASE_PERSONA,
                     response_mime_type="application/json",
                     response_schema=schema,
@@ -455,7 +500,7 @@ class GeminiService:
                 self.client.models.generate_content,
                 model=GEMINI_MODEL,
                 contents=prompt,
-                config=types.GenerateContentConfig(
+                config=generation_config(
                     response_mime_type="application/json",
                     response_schema=schema,
                 ),
@@ -493,7 +538,7 @@ class GeminiService:
                 self.client.models.generate_content,
                 model=GEMINI_MODEL,
                 contents=prompt,
-                config=types.GenerateContentConfig(
+                config=generation_config(
                     response_mime_type="application/json",
                     response_schema=schema,
                 ),

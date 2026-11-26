@@ -39,9 +39,9 @@ TOOL_DECLARATIONS = [
     {
         "name": "request_quotes",
         "description": (
-            "Start the brokered quote/dispatch flow for this homeowner. "
-            "Requires enough issue detail or a prior diagnosis. "
-            "If details are thin, ask for a photo instead of calling this."
+            "Start quotes after the homeowner described a specific problem and agreed "
+            "to contact pros. Do not call this on a vague first message such as "
+            "'it is not working'. Ask a symptom question first."
         ),
         "parameters": {
             "type": "object",
@@ -114,8 +114,14 @@ async def execute_tool(
                     "error": "Dispatch is not enabled yet. Ask them to send a photo for diagnosis.",
                 }
             summary = str(args.get("job_summary") or "").strip()
-            if not summary:
-                return {"ok": False, "error": "Need a job_summary or a photo first."}
+            if len(summary.split()) < 8:
+                return {
+                    "ok": False,
+                    "error": (
+                        "Too vague to contact a pro. Ask one specific symptom question "
+                        "and do not offer pros until they answer."
+                    ),
+                }
             # Mark intent in conversation_state; agent/dispatch layer completes consent flow
             from app.models import MODE_AWAITING_DISPATCH_CONSENT
             from app.services.conversation_state import conversation_state_store

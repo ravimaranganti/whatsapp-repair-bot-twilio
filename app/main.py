@@ -20,8 +20,10 @@ from app.admin_routes import router as admin_router
 from app.models import MessageContent
 from app.services.agent import process_message
 from app.services.idempotency import already_processed, mark_processed
+from app.services.inbound_guard import RATE_LIMIT_REPLY, cap_text, inbound_limiter
 from app.services.interactions import parse_interaction
 from app.services.task_queue import enqueue_process_message, tasks_enabled
+from app.utils.phones import normalize_phone
 
 logging.basicConfig(
     level=settings.log_level,
@@ -154,6 +156,13 @@ async def handle_webhook(
         return PlainTextResponse("", status_code=200)
 
     sender = From.removeprefix("whatsapp:")
+    phone = normalize_phone(sender)
+    if NumMedia > 1:
+        logger.info(
+            "NumMedia=%s from %s — only MediaUrl0 is sent to Gemini",
+            NumMedia,
+            sender,
+        )
     interaction = parse_interaction(form)
 
     if interaction.kind == "media" and interaction.media_url:
@@ -167,12 +176,27 @@ async def handle_webhook(
         logger.warning("Empty message from %s — ignoring", sender)
         return PlainTextResponse("", status_code=200)
 
+    # Length cap before the body is stored or handed to Gemini.
+    text = cap_text(interaction.text or Body)
+    decision = inbound_limiter.admit(phone)
+    if decision != "ok":
+        if decision == "reply":
+            from app.services.whatsapp import whatsapp_service
+
+            try:
+                await whatsapp_service.send_text_message(phone, RATE_LIMIT_REPLY)
+            except Exception:
+                logger.exception("Rate-limit reply failed for %s", sender)
+        await mark_processed(MessageSid, sender)
+        logger.info("Rate limited %s (%s)", sender, decision)
+        return PlainTextResponse("", status_code=200)
+
     message = MessageContent(
         id=MessageSid,
         from_=sender,
         type=msg_type,
-        body=interaction.text or Body,
-        media_url=interaction.media_url or MediaUrl0,
+        body=text,
+        media_url=interaction.media_url or (MediaUrl0 if NumMedia else None),
         media_content_type=interaction.media_content_type or MediaContentType0,
         button_payload=interaction.payload or ButtonPayload,
         button_text=ButtonText,
@@ -183,6 +207,7 @@ async def handle_webhook(
     await mark_processed(MessageSid, sender)
 
     payload = message.model_dump()
+    payload["rate_checked"] = True
     enqueued = await enqueue_process_message(payload)
     if not enqueued:
         # Pilot fallback: in-process background task
@@ -197,7 +222,18 @@ async def tasks_process_message(request: Request):
     # Soft auth: when OIDC is configured at the load balancer / Cloud Run IAM,
     # unauthenticated calls are blocked there. Optional header check for shared secret later.
     data = await request.json()
+    checked = bool(data.pop("rate_checked", False))
     message = MessageContent.model_validate(data)
+    message.body = cap_text(message.body or "")
+    if not checked:
+        phone = normalize_phone(message.from_)
+        decision = inbound_limiter.admit(phone)
+        if decision != "ok":
+            if decision == "reply":
+                from app.services.whatsapp import whatsapp_service
+
+                await whatsapp_service.send_text_message(phone, RATE_LIMIT_REPLY)
+            return {"ok": True, "limited": True}
     await process_message(message, message.from_)
     return {"ok": True}
 

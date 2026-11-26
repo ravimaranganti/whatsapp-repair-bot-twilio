@@ -92,7 +92,7 @@ async def capture_pending_feedback(
     transcript = body
     if media_url and not body:
         try:
-            from app.services.gemini import gemini_service
+            from app.services.gemini import gemini_service, generation_config
             from app.services.whatsapp import whatsapp_service as wa
 
             audio = await wa.download_media(media_url)
@@ -107,6 +107,7 @@ async def capture_pending_feedback(
                         types.Part.from_bytes(data=audio, mime_type="audio/ogg"),
                         "Transcribe this voice note verbatim.",
                     ],
+                    config=generation_config(),
                 )
                 return (resp.text or "").strip()
 
@@ -223,12 +224,14 @@ async def run_weekly_digest() -> str:
         "ratings, top complaints, notable misdiagnoses. Keep under 1200 chars.\n\n"
         f"DATA:\n{data}"
     )
-    from app.services.gemini import gemini_service
+    from app.services.gemini import gemini_service, generation_config
     import asyncio as aio
 
     def _gen() -> str:
         resp = gemini_service.client.models.generate_content(
-            model="gemini-2.5-flash", contents=prompt
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=generation_config(),
         )
         return (resp.text or "").strip()[:1500]
 

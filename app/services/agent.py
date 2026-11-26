@@ -44,7 +44,10 @@ def _on_allowlist(phone: str) -> bool:
 async def process_message(message: MessageContent, sender: str):
     """Main entry after webhook ack / task dequeue."""
     try:
+        from app.services.inbound_guard import cap_text
+
         phone = normalize_phone(sender)
+        message.body = cap_text(message.body or "")
         from app.services.session_window import record_inbound
 
         await record_inbound(phone)
@@ -234,12 +237,24 @@ async def handle_text_message(message: MessageContent, sender: str):
         service_notes = await homeowner_store.list_service_notes(sender)
     except Exception:
         service_notes = []
+    profile_note = ""
+    try:
+        from app.services.homeowner_profile import chat_profile_note
+        from app.services.jobs import job_store
+
+        ho = await homeowner_store.get(sender)
+        job_id = str((ho or {}).get("active_job_id") or "")
+        job = await job_store.get_job(job_id) if job_id else None
+        profile_note = chat_profile_note(ho, job)
+    except Exception:
+        logger.warning("homeowner profile note unavailable for %s", sender)
     try:
         reply = await gemini_service.chat_reply(
             prior,
             raw,
             memory_facts=memory_facts,
             service_notes=service_notes,
+            profile_note=profile_note,
             phone=sender,
         )
     except Exception as e:

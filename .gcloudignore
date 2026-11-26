@@ -1,0 +1,15 @@
+.git
+.gitignore
+.gcloudignore
+.env
+.env.*
+!.env.example
+google-cloud-sdk/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.vscode/
+.idea/
+.DS_Store

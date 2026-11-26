@@ -3,12 +3,14 @@
 import asyncio
 
 from app.services.homeowner_profile import (
+    chat_profile_note,
     first_time_zip_prompt,
     parse_visit_reply,
     parse_zip_and_name,
     read_zip_and_name,
     returning_zip_message,
     zip_only_update,
+    zip_reply_effect,
 )
 
 
@@ -21,7 +23,17 @@ def test_zip_and_first_name_parse_without_a_form():
     assert zip_only_update("my kitchen sink is leaking in 77008") == ""
 
 
-def test_prompts_match_the_intake_copy():
+def test_same_zip_does_not_end_a_second_issue():
+    assert zip_reply_effect("77479", "77479", "dispatched") == "continue"
+    assert zip_reply_effect("77479", "77008", "dispatched") == "already_out"
+    assert zip_reply_effect("77479", "77008", "diagnosed") == "update_job"
+    assert zip_reply_effect("", "77479", None) == "save_only"
+    note = chat_profile_note(
+        {"zip_code": "77479", "first_name": "Ravi"},
+        {"trade": "plumbing", "state": "dispatched", "area_zip": "77479"},
+    )
+    assert "Saved ZIP: 77479" in note
+    assert "plumbing (dispatched)" in note
     first = first_time_zip_prompt("plumbing")
     assert "Got it—I can check with local plumbing pros" in first
     assert "5-digit ZIP code" in first
