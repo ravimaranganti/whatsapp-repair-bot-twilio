@@ -132,6 +132,36 @@ async def handle_webhook(
 ):
     """Validate, dedupe, enqueue, return 200 immediately (empty body / TwiML)."""
     form = dict(await request.form())
+    message_status = str(form.get("MessageStatus") or form.get("SmsStatus") or "").lower()
+    outbound_statuses = {"queued", "sent", "delivered", "undelivered", "failed", "read"}
+    if (
+        message_status in outbound_statuses
+        and not str(form.get("Body") or "").strip()
+        and int(form.get("NumMedia") or 0) == 0
+        and not form.get("ButtonPayload")
+    ):
+        if not _validate_twilio_signature(request, form, x_twilio_signature or ""):
+            logger.warning("Invalid Twilio signature for SID=%s", MessageSid)
+            raise HTTPException(status_code=403, detail="Invalid signature")
+        error_code = str(form.get("ErrorCode") or "")
+        if error_code == "63049":
+            logger.error(
+                "WhatsApp template blocked as Marketing (63049). "
+                "sid=%s to=%s status=%s error_message=%s",
+                MessageSid,
+                form.get("To") or "",
+                message_status,
+                form.get("ErrorMessage") or "",
+            )
+        else:
+            logger.info(
+                "Twilio status sid=%s status=%s error=%s",
+                MessageSid,
+                message_status,
+                error_code,
+            )
+        return PlainTextResponse("", status_code=200)
+
     # Ensure Form() params are in the dict for signature validation
     form.setdefault("MessageSid", MessageSid)
     form.setdefault("From", From)

@@ -5,6 +5,7 @@ All outbound replies use the REST API (not TwiML).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -115,6 +116,7 @@ class WhatsAppService:
         *,
         content_sid: str,
         content_variables: dict | None = None,
+        status_callback: str | None = None,
     ) -> dict:
         """
         Send an approved Content Template (WhatsApp).
@@ -129,6 +131,8 @@ class WhatsAppService:
         }
         if content_variables:
             payload["ContentVariables"] = json.dumps(content_variables)
+        if status_callback:
+            payload["StatusCallback"] = status_callback
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -155,6 +159,38 @@ class WhatsAppService:
             except Exception:
                 pass
             return result
+
+    async def delivery_state(self, message_sid: str) -> tuple[str, int | None]:
+        """Current Twilio status and error code for one outbound message."""
+        url = (
+            f"{_TWILIO_API_BASE}/Accounts/{settings.twilio_account_sid}"
+            f"/Messages/{message_sid}.json"
+        )
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, auth=self._auth, timeout=20.0)
+            response.raise_for_status()
+            data = response.json()
+        status = str(data.get("status") or "")
+        code = data.get("error_code")
+        try:
+            error_code = int(code) if code not in (None, "") else None
+        except (TypeError, ValueError):
+            error_code = None
+        return status, error_code
+
+    async def wait_for_delivery(self, message_sid: str) -> tuple[str, int | None]:
+        """Poll briefly. Meta rejects some templates after Twilio has already accepted them."""
+        last = ("queued", None)
+        for _ in range(4):
+            await asyncio.sleep(2)
+            try:
+                last = await self.delivery_state(message_sid)
+            except Exception as exc:
+                logger.warning("delivery check failed for %s: %s", message_sid, exc)
+                return last
+            if last[0] in {"delivered", "read", "undelivered", "failed"}:
+                return last
+        return last
 
     async def send_session_buttons(
         self,

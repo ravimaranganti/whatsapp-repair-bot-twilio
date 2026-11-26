@@ -111,6 +111,10 @@ class Settings(BaseSettings):
 
     # Twilio Content Template SIDs (submit via Content Template Builder; Utility category)
     tpl_job_alert_sid: str = Field(default="", description="job_alert Content SID")
+    twilio_dispatch_utility_template_sid: str = Field(
+        default="",
+        description="Approved Utility Content SID for US pro dispatch tickets",
+    )
     tpl_job_not_selected_sid: str = Field(
         default="", description="job_not_selected Content SID"
     )
@@ -225,6 +229,10 @@ class Settings(BaseSettings):
     operator_phone: str = Field(
         default="",
         description="E.164 phone that receives the weekly digest",
+    )
+    founder_alert_phone: str = Field(
+        default="",
+        description="E.164 phone for a 30-minute unanswered-job rescue alert. Falls back to OPERATOR_PHONE.",
     )
 
     # Optional Cloud Tasks (preferred over in-process background work)

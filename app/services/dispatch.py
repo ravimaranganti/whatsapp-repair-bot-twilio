@@ -350,6 +350,15 @@ async def _apply_homeowner_tap(
         await maybe_send_homeowner_options(tap.job_id, force=True)
         return True
 
+    if tap.action in {"keep_waiting", "direct_numbers"}:
+        if job.get("state") != "dispatched":
+            await _already_updated(phone, tap.job_id)
+            return True
+        from app.services.job_escalation import apply_escalation_choice
+
+        await apply_escalation_choice(phone, job, tap.action)
+        return True
+
     if tap.action in {"keep_looking", "close_job", "retry_pros"}:
         if tap.action == "close_job" and job.get("state") == "assigned":
             await _close_homeowner_job(phone, job)
@@ -544,6 +553,22 @@ async def handle_homeowner_typed(phone: str, body: str) -> bool:
     if await maybe_update_saved_zip(phone, body):
         return True
     phrase = " ".join((body or "").lower().split())
+    if phrase in {"keep", "call"}:
+        phone_n = normalize_phone(phone)
+        ho = await homeowner_store.get(phone_n)
+        job_id = str((ho or {}).get("active_job_id") or "")
+        job = await job_store.get_job(job_id) if job_id else None
+        if (
+            job
+            and job.get("state") == "dispatched"
+            and job.get("escalation_60_sent")
+            and not job.get("escalation_choice")
+        ):
+            from app.services.job_escalation import apply_escalation_choice
+
+            choice = "keep_waiting" if phrase == "keep" else "direct_numbers"
+            await apply_escalation_choice(phone_n, job, choice)
+            return True
     if phrase in {"job completed", "still scheduled", "didn't work out", "didnt work out"}:
         phone_n = normalize_phone(phone)
         jobs = await job_store.list_for_homeowner(phone_n, {"assigned"})
@@ -956,11 +981,11 @@ async def _send_job_alert(
     area_zip: str,
 ) -> bool:
     to = to_e164(pro["phone"])
-    trade_v = clean_template_value(trade, "repair")
-    zip_v = clean_template_value(area_zip, "your area", limit=32)
-    issue_v = clean_template_value(issue, "home repair", limit=200)
+    ticket = clean_template_value(job_id, "ticket", limit=32)
+    trade_v = clean_template_value(trade, "repair", limit=40)
+    area_v = clean_template_value(area_zip, "your area", limit=32)
+    summary_v = clean_template_value(issue, "home repair", limit=200)
     severity_v = clean_template_value(severity, "medium", limit=32)
-    ref = clean_template_value(job_id, "this job", limit=32)
     link_line = ""
     try:
         from app.services.portal_auth import LINK_TEXT, issue_magic_link
@@ -971,36 +996,72 @@ async def _send_job_alert(
     except Exception as e:
         logger.warning("dashboard link on alert skipped: %s", e)
     body = (
-        f"New *{trade_v}* request near {zip_v}: {issue_v}\n"
+        f"New *{trade_v}* request near {area_v}: {summary_v}\n"
         f"Severity: {severity_v}\n\n"
-        f"Tap a button on this message, or reply *Interested {job_ref(ref)}* "
-        f"or *Not available {job_ref(ref)}*."
+        f"Tap a button on this message, or reply *Interested {job_ref(ticket)}* "
+        f"or *Not available {job_ref(ticket)}*."
     )
     if link_line:
         body = f"{body}\n\n{link_line}"
     variables = {
-        "1": trade_v,
-        "2": zip_v,
-        "3": issue_v,
-        "4": severity_v,
-        "5": ref,
+        "1": ticket,
+        "2": trade_v,
+        "3": area_v,
+        "4": summary_v,
     }
-    sid = (settings.tpl_job_alert_sid or "").strip()
+    sid = (settings.twilio_dispatch_utility_template_sid or "").strip()
+    buttons = [
+        (f"accept_job:{ticket}", "Interested"),
+        (f"decline_job:{ticket}", "Not available"),
+    ]
     try:
-        if sid:
-            try:
-                await whatsapp_service.send_content_template(
-                    to, content_sid=sid, content_variables=variables
+        if window_is_open(await get_last_inbound(pro["phone"])):
+            await whatsapp_service.send_session_buttons(to, body, buttons)
+            return True
+        if not sid:
+            logger.error(
+                "TWILIO_DISPATCH_UTILITY_TEMPLATE_SID is empty; job alert not sent"
+            )
+            return False
+        base = (settings.public_base_url or "").rstrip("/")
+        callback = f"{base}/webhook" if base else None
+        result = await whatsapp_service.send_content_template(
+            to,
+            content_sid=sid,
+            content_variables=variables,
+            status_callback=callback or None,
+        )
+        message_sid = str(result.get("sid") or "")
+        if message_sid:
+            status, code = await whatsapp_service.wait_for_delivery(message_sid)
+            if status in {"undelivered", "failed"} or code == 63049:
+                if code == 63049:
+                    logger.error(
+                        "WhatsApp template blocked as Marketing (63049). "
+                        "sid=%s to=%s status=%s",
+                        message_sid,
+                        to,
+                        status,
+                    )
+                else:
+                    logger.warning(
+                        "job alert %s was not delivered (%s %s)",
+                        message_sid,
+                        status,
+                        code,
+                    )
+                await log_event(
+                    phone=to,
+                    role="system",
+                    type="error",
+                    job_id=job_id,
+                    payload={
+                        "error": "job_alert_undelivered",
+                        "status": status,
+                        "code": code,
+                    },
                 )
-                if link_line and window_is_open(await get_last_inbound(pro["phone"])):
-                    try:
-                        await whatsapp_service.send_text_message(to, link_line)
-                    except Exception as e:
-                        logger.warning("dashboard link follow-up failed: %s", e)
-                return True
-            except Exception as e:
-                logger.warning("job alert template failed, trying text: %s", e)
-        await whatsapp_service.send_text_message(to, body)
+                return False
         return True
     except Exception as e:
         logger.warning("job alert send failed: %s", e)
@@ -1048,6 +1109,34 @@ async def handle_pro_alert_response(phone: str, body: str, payload: str) -> bool
         await pro_store.remove_pending_alert(phone_n, job_id)
         return True
 
+    if decision.status == "view":
+        diagnosis = job.get("diagnosis") if isinstance(job.get("diagnosis"), dict) else {}
+        brief = diagnosis.get("pro_brief") if isinstance(diagnosis.get("pro_brief"), dict) else {}
+        summary = " ".join(str(brief.get("issue") or "").split()) or "home repair"
+        await whatsapp_service.send_text_message(
+            phone_n,
+            f"Dispatch ticket {ref}\n"
+            f"Trade: {job.get('trade') or 'repair'}\n"
+            f"Area: {job.get('area_zip') or 'your area'}\n"
+            f"Summary: {summary}",
+        )
+        await conversation_state_store.set(
+            phone_n,
+            MODE_PRO_AWAITING_DETAILS,
+            {"job_id": job_id, "active_job_id": job_id},
+        )
+        await whatsapp_service.send_text_message(
+            phone_n,
+            "Reply with when you can come and a rough estimate, "
+            f"or PASS {job_id} to decline.",
+        )
+        await log_event(
+            phone=phone_n, role="pro", type="ticket_viewed", job_id=job_id, payload={}
+        )
+        await job_store.upsert_response(job_id, phone_n, status="viewed")
+        await job_store.update_fields(job_id, escalation_stopped=True)
+        return True
+
     await pro_store.remove_pending_alert(phone_n, job_id)
     if decision.status == "declined":
         await job_store.upsert_response(job_id, phone_n, status="declined")
@@ -1060,6 +1149,7 @@ async def handle_pro_alert_response(phone: str, body: str, payload: str) -> bool
         return True
 
     await job_store.upsert_response(job_id, phone_n, status="interested")
+    await job_store.update_fields(job_id, escalation_stopped=True)
     await conversation_state_store.set(
         phone_n,
         MODE_PRO_AWAITING_DETAILS,
@@ -1151,6 +1241,7 @@ async def handle_pro_details(phone: str, body: str, state: dict[str, Any]) -> bo
         pro_question=reply.question_for_homeowner,
         responded_at=datetime.now(timezone.utc).isoformat(),
     )
+    await job_store.update_fields(job_id, escalation_stopped=True)
     await conversation_state_store.clear(phone_n)
     await whatsapp_service.send_text_message(
         phone_n,

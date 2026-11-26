@@ -126,10 +126,14 @@ async def run_homeowner_followups(now: datetime | None = None) -> dict[str, int]
     from app.services.job_checkin import run_post_job_checkins
 
     checkins = await run_post_job_checkins(current)
+    from app.services.job_escalation import run_unanswered_escalations
+
+    escalations = await run_unanswered_escalations(current)
     return {
         "processedNoReply": no_reply,
         "processedQuoteReminders": reminders,
         "processedCheckins": checkins,
+        **escalations,
     }
 
 

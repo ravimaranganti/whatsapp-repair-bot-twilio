@@ -33,6 +33,13 @@ def test_typed_reference_picks_the_named_job():
     assert reply.job_id == "bbb222" and reply.status == "interested"
 
 
+def test_view_and_pass_commands_name_the_ticket():
+    view = resolve_alert_reply("", "VIEW b5905bc59ec44a42", [])
+    passed = resolve_alert_reply("", "pass #b5905bc59ec44a42", [])
+    assert view.status == "view" and view.job_id == "b5905bc59ec44a42"
+    assert passed.status == "declined" and passed.job_id == "b5905bc59ec44a42"
+
+
 def test_unrelated_text_is_not_an_alert_reply():
     reply = resolve_alert_reply("", "Yes I can come tomorrow around 2", ["aaa111"])
     assert not reply.handled

@@ -48,7 +48,7 @@ def parse_homeowner_payload(payload: str) -> HomeownerTap | None:
     if action in {"book_quote", "ask_quote", "pass_quote", "decline_quote"} and len(rest) >= 2:
         name = "pass_quote" if action in {"pass_quote", "decline_quote"} else action
         return HomeownerTap(name, rest[0], rest[1])
-    if action in {"keep_looking", "close_job", "retry_pros"} and rest and rest[0]:
+    if action in {"keep_looking", "close_job", "retry_pros", "keep_waiting", "direct_numbers"} and rest and rest[0]:
         return HomeownerTap(action, rest[0])
     if action == "share" and len(rest) >= 3 and rest[0] in {"yes", "no"}:
         name = "share_yes" if rest[0] == "yes" else "share_no"

@@ -69,6 +69,7 @@ async def landing(request: Request):
         "landing.html",
         {
             "homeowner_url": _wa_url("Hi HomePro, I need help with a home project"),
+            "homeowner_url_es": _wa_url("Hola HomePro, necesito ayuda con un proyecto en casa"),
             "pro_url": _wa_url("Pro Signup"),
         },
     )

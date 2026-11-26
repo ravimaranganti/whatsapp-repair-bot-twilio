@@ -6,12 +6,32 @@ import logging
 from typing import Any
 
 from app.config import settings
+from app.services.homeowner_profile import saved_zip
 from app.services.homeowners import homeowner_store
 from app.services.jobs import job_store
 from app.services.matching import public_pro_card, select_pros_for_job
+from app.services.places import search_local_specialists
 from app.utils.phones import normalize_phone
 
 logger = logging.getLogger(__name__)
+
+_TRADE_HINTS = (
+    ("hvac", ("hvac", "heater", "heating", "furnace", "thermostat", "air condition", "a/c", " ac ")),
+    ("plumbing", ("plumb", "leak", "sink", "toilet", "faucet", "drain", "water heater")),
+    ("electrical", ("electric", "outlet", "breaker", "wiring", "light switch")),
+    ("appliance", ("appliance", "washer", "dryer", "dishwasher", "refrigerator", "fridge", "oven")),
+    ("handyman", ("handyman", "mount", "paint", "drywall", "furniture")),
+)
+
+
+def _trade_hint(summary: str) -> str:
+    low = f" {(summary or '').lower()} "
+    if "water heater" in low:
+        return "plumbing"
+    for trade, words in _TRADE_HINTS:
+        if any(word in low for word in words):
+            return trade
+    return ""
 
 
 TOOL_DECLARATIONS = [
@@ -39,9 +59,10 @@ TOOL_DECLARATIONS = [
     {
         "name": "request_quotes",
         "description": (
-            "Start quotes after the homeowner described a specific problem and agreed "
-            "to contact pros. Do not call this on a vague first message such as "
-            "'it is not working'. Ask a symptom question first."
+            "Start quotes only after search_pros returned signed-up pros, the problem "
+            "is specific, and the homeowner agreed. Do not call this when search_pros "
+            "returned places. Do not call this on a vague first message such as "
+            "'it is not working'."
         ),
         "parameters": {
             "type": "object",
@@ -49,6 +70,10 @@ TOOL_DECLARATIONS = [
                 "job_summary": {
                     "type": "string",
                     "description": "Short summary of the issue to send to pros",
+                },
+                "trade": {
+                    "type": "string",
+                    "description": "plumbing|hvac|electrical|handyman|appliance",
                 },
             },
             "required": ["job_summary"],
@@ -97,13 +122,25 @@ async def execute_tool(
             )
             # If none opted-in yet, still search with only_opted_in relaxed for pilot visibility?
             # Spec: only opted_in for alerts; for search show opted-in only.
+            if pros:
+                return {
+                    "count": len(pros),
+                    "pros": [public_pro_card(p) for p in pros],
+                    "places": [],
+                    "note": "Phone numbers are hidden until the homeowner picks a pro.",
+                }
+            places = await search_local_specialists(trade, area_zip)
             return {
-                "count": len(pros),
-                "pros": [public_pro_card(p) for p in pros],
+                "count": 0,
+                "pros": [],
+                "places": places,
                 "note": (
-                    "Phone numbers are hidden until the homeowner picks a pro."
-                    if pros
-                    else "No opted-in pros matched. Suggest sending a photo to start a job request."
+                    "No signed-up pros. Read these Google listings to the customer now "
+                    "with name, rating, and phone so they can call. Do not offer a job "
+                    "request and do not say you will contact professionals."
+                    if places
+                    else "No signed-up pros and no public listings. Say that plainly. "
+                    "Do not offer to send the job to professionals."
                 ),
             }
 
@@ -122,11 +159,27 @@ async def execute_tool(
                         "and do not offer pros until they answer."
                     ),
                 }
+            trade = str(args.get("trade") or _trade_hint(summary) or "").strip()
+            ho = await homeowner_store.ensure(phone)
+            if trade:
+                area_zip = saved_zip(ho)
+                pros = await select_pros_for_job(
+                    trade=trade, area_zip=area_zip, severity="medium"
+                )
+                if not pros:
+                    places = await search_local_specialists(trade, area_zip) if area_zip else []
+                    return {
+                        "ok": False,
+                        "places": places,
+                        "error": (
+                            "No signed-up pros for this trade. Share the places list with "
+                            "phone numbers. Do not say a job summary will be sent to professionals."
+                        ),
+                    }
             # Mark intent in conversation_state; agent/dispatch layer completes consent flow
             from app.models import MODE_AWAITING_DISPATCH_CONSENT
             from app.services.conversation_state import conversation_state_store
 
-            ho = await homeowner_store.ensure(phone)
             await conversation_state_store.set(
                 phone,
                 MODE_AWAITING_DISPATCH_CONSENT,

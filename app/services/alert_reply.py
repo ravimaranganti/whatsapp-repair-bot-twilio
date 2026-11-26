@@ -9,6 +9,8 @@ _ACCEPT_PAYLOADS = frozenset({"interested", "yes"})
 _DECLINE_PAYLOADS = frozenset({"not_available", "declined", "no"})
 _DECLINE_TEXT = frozenset({"no", "decline", "declined", "pass", "not available"})
 _ACCEPT_TEXT = frozenset({"yes", "y", "interested"})
+_VIEW_CMD = re.compile(r"^view\s+#?([a-f0-9]{8,32})\b", re.IGNORECASE)
+_PASS_CMD = re.compile(r"^pass\s+#?([a-f0-9]{8,32})\b", re.IGNORECASE)
 
 
 @dataclass
@@ -94,6 +96,12 @@ def resolve_alert_reply(
 
     pl = (payload or "").strip().lower()
     low = " ".join((body or "").lower().split())
+    view = _VIEW_CMD.match(low)
+    if view:
+        return AlertReply(handled=True, status="view", job_id=view.group(1).lower())
+    passed = _PASS_CMD.match(low)
+    if passed:
+        return AlertReply(handled=True, status="declined", job_id=passed.group(1).lower())
     if pl in _ACCEPT_PAYLOADS:
         return _from_text("interested", body, open_ids, from_button=True)
     if pl in _DECLINE_PAYLOADS:

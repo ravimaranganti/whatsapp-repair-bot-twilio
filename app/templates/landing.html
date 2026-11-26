@@ -1,53 +1,172 @@
 {% extends "base.html" %}
-{% block title %}HomePro Assistant — Sugar Land & Greater Houston{% endblock %}
+{% block title %}HomePro Assistant — Greater Houston{% endblock %}
 {% block head %}
 <style>
-  header, main, footer { padding: 28px 0; }
-  h1 { font-family: Georgia, "Iowan Old Style", serif; font-size: 34px; line-height: 1.15; font-weight: 600; margin: 10px 0 12px; }
+  .wrap { width: min(760px, calc(100% - 32px)); }
+  header, main, footer { padding: 8px 0 28px; }
+  h1 {
+    font-family: Georgia, "Iowan Old Style", serif;
+    font-size: 36px;
+    line-height: 1.12;
+    font-weight: 600;
+    margin: 10px 0 12px;
+  }
+  h2 { font-size: 20px; margin: 0 0 8px; }
   .lede { color: var(--muted); font-size: 18px; }
+  .free { margin-top: 14px; font-weight: 700; }
+  .places { color: var(--muted); font-size: 14px; margin-top: 6px; }
+  .lang-radio {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+  .switch {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    padding-top: 22px;
+  }
+  .switch label {
+    min-height: 36px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--card);
+    color: var(--ink);
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  body:has(#lang-en:checked) .es { display: none; }
+  body:has(#lang-es:checked) .en { display: none; }
+  body:has(#lang-en:checked) label[for="lang-en"],
+  body:has(#lang-es:checked) label[for="lang-es"] {
+    background: var(--green);
+    color: white;
+    border-color: var(--green);
+  }
   .cta { margin-top: 22px; }
-  .steps { margin-top: 28px; display: grid; gap: 12px; }
-  .step { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
-  .step b { display: block; margin-bottom: 4px; }
-  .step span { color: var(--green); font-size: 13px; font-weight: 700; letter-spacing: 0.04em; }
+  @media (min-width: 640px) {
+    .cta { grid-template-columns: 1fr 1fr; }
+  }
+  .columns { margin-top: 8px; display: grid; gap: 14px; }
+  @media (min-width: 720px) {
+    .columns { grid-template-columns: 1fr 1fr; }
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 16px;
+  }
+  .card ol { margin: 8px 0 0; padding-left: 18px; }
+  .card li { margin: 8px 0; }
+  .note { margin-top: 16px; color: var(--muted); font-size: 14px; }
   footer { color: var(--muted); font-size: 14px; }
 </style>
 {% endblock %}
 {% block body %}
-<header>
-  <div class="wrap">
-    <p class="eyebrow">Sugar Land &amp; Greater Houston</p>
-    <h1>Your WhatsApp home concierge.</h1>
-    <p class="lede">Get vetted local pros without the phone tag.</p>
+<input class="lang-radio" id="lang-en" type="radio" name="lang" checked>
+<input class="lang-radio" id="lang-es" type="radio" name="lang">
+<div class="wrap">
+  <div class="switch" role="group" aria-label="Language">
+    <label for="lang-en">English</label>
+    <label for="lang-es">Español</label>
+  </div>
+
+  <header class="en">
+    <p class="eyebrow">Greater Houston</p>
+    <p class="places">Houston, Sugar Land, Katy, The Woodlands, Pearland, Cypress, League City, Missouri City, and Conroe.</p>
+    <h1>Home repairs, handled on WhatsApp.</h1>
+    <p class="lede">HomePro Assistant matches a home problem with local pros who cover your area. Customers and pros both stay in the same chat.</p>
+    <p class="free">Completely free for homeowners and pros.</p>
     <div class="stack cta">
       <a class="btn btn-primary" href="{{ homeowner_url }}">Chat on WhatsApp</a>
       <a class="btn btn-secondary" href="{{ pro_url }}">Join as a Pro</a>
     </div>
-  </div>
-</header>
-<main>
-  <div class="wrap">
-    <h2>How it works</h2>
-    <div class="steps">
-      <article class="step">
-        <span>Step 1</span>
-        <b>Describe the job on WhatsApp</b>
-        A repair, install, mount, or paint project. A photo helps the pros see what you see.
+  </header>
+
+  <header class="es">
+    <p class="eyebrow">Gran Houston</p>
+    <p class="places">Houston, Sugar Land, Katy, The Woodlands, Pearland, Cypress, League City, Missouri City y Conroe.</p>
+    <h1>Reparaciones del hogar, por WhatsApp.</h1>
+    <p class="lede">HomePro Assistant conecta un problema de la casa con profesionales locales que cubren tu zona. Clientes y profesionales usan el mismo chat.</p>
+    <p class="free">Completamente gratis para clientes y profesionales.</p>
+    <div class="stack cta">
+      <a class="btn btn-primary" href="{{ homeowner_url_es }}">Chatear por WhatsApp</a>
+      <a class="btn btn-secondary" href="{{ pro_url }}">Únete como profesional</a>
+    </div>
+  </header>
+
+  <main class="en">
+    <div class="columns">
+      <article class="card">
+        <h2>For customers</h2>
+        <ol>
+          <li>Message the bot and describe the problem. A photo helps.</li>
+          <li>Answer one short question so the request is specific.</li>
+          <li>Pros who cover your ZIP reply with a time and a rough estimate.</li>
+          <li>Choose one in the chat. Phone numbers stay private until you book.</li>
+        </ol>
       </article>
-      <article class="step">
-        <span>Step 2</span>
-        <b>Get quotes from local pros</b>
-        Nearby pros who cover your area reply with a time and a rough estimate.
-      </article>
-      <article class="step">
-        <span>Step 3</span>
-        <b>Book in the chat</b>
-        Pick a pro on WhatsApp. Phone numbers stay private until you do.
+      <article class="card">
+        <h2>For pros</h2>
+        <ol>
+          <li>Tap Join as a Pro. WhatsApp opens with the message “Pro Signup”.</li>
+          <li>Share your trade, the areas you cover, and when you can take jobs.</li>
+          <li>Job alerts arrive on WhatsApp. Reply on that message to view the ticket or pass.</li>
+          <li>If the customer books you, the visit details come back in the chat.</li>
+        </ol>
       </article>
     </div>
-  </div>
-</main>
-<footer>
-  <div class="wrap">HomePro Assistant · Agentic Holdings LLC</div>
-</footer>
+    <p class="note">Both buttons open a chat with HomePro Assistant. Sending the first message starts the conversation.</p>
+  </main>
+
+  <main class="es">
+    <div class="columns">
+      <article class="card">
+        <h2>Para clientes</h2>
+        <ol>
+          <li>Escríbele al bot y describe el problema. Una foto ayuda.</li>
+          <li>Responde una pregunta corta para precisar la solicitud.</li>
+          <li>Los profesionales que cubren tu código postal responden con un horario y un estimado.</li>
+          <li>Elige a uno en el chat. Los teléfonos se comparten cuando reservas.</li>
+        </ol>
+      </article>
+      <article class="card">
+        <h2>Para profesionales</h2>
+        <ol>
+          <li>Pulsa Únete como profesional. WhatsApp se abre con el mensaje “Pro Signup”.</li>
+          <li>Indica tu oficio, las zonas que cubres y cuándo puedes tomar trabajos.</li>
+          <li>Los avisos de trabajo llegan por WhatsApp. Responde en ese mensaje para ver el ticket o pasarlo.</li>
+          <li>Si el cliente te elige, los datos de la visita llegan en el chat.</li>
+        </ol>
+      </article>
+    </div>
+    <p class="note">Los dos botones abren un chat con HomePro Assistant. El primer mensaje inicia la conversación.</p>
+  </main>
+
+  <footer>HomePro Assistant · Agentic Holdings LLC</footer>
+</div>
+<script>
+  (function () {
+    var en = document.getElementById("lang-en");
+    var es = document.getElementById("lang-es");
+    var stored = "";
+    try { stored = localStorage.getItem("homepro-lang") || ""; } catch (e) {}
+    var query = new URLSearchParams(location.search).get("lang");
+    var choice = query || stored;
+    if (choice === "es") es.checked = true;
+    function remember() {
+      var lang = es.checked ? "es" : "en";
+      document.documentElement.lang = lang;
+      try { localStorage.setItem("homepro-lang", lang); } catch (e) {}
+    }
+    en.addEventListener("change", remember);
+    es.addEventListener("change", remember);
+    remember();
+  })();
+</script>
 {% endblock %}

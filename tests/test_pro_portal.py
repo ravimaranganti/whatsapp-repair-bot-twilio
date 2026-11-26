@@ -143,8 +143,13 @@ def test_landing_and_magic_link_login(monkeypatch):
     assert landing.status_code == 200
     assert "Chat on WhatsApp" in landing.text
     assert "Join as a Pro" in landing.text
+    assert "Chatear por WhatsApp" in landing.text
+    assert "Únete como profesional" in landing.text
     assert "Pro%20Signup" in landing.text
-    assert "without the phone tag" in landing.text
+    assert "necesito%20ayuda" in landing.text
+    assert "local pros who cover your area" in landing.text
+    assert "Completely free for homeowners and pros." in landing.text
+    assert "Completamente gratis para clientes y profesionales." in landing.text
 
     locked = client.get("/pro/dashboard")
     assert locked.status_code == 401
