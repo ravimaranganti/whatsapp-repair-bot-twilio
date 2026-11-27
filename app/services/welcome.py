@@ -51,6 +51,20 @@ HELP_HOMEOWNER = (
 )
 
 
+def _paused_homeowner() -> str:
+    from app.services.customer_preview import PAUSED_HOMEOWNER
+
+    return PAUSED_HOMEOWNER
+
+
+def _homeowner_ready() -> str:
+    return HOMEOWNER_READY if settings.customer_requests_enabled else _paused_homeowner()
+
+
+def _homeowner_help() -> str:
+    return HELP_HOMEOWNER if settings.customer_requests_enabled else _paused_homeowner()
+
+
 def _support_display(phone: str) -> str:
     digits = normalize_phone(phone)
     if len(digits) == 10:
@@ -656,7 +670,7 @@ async def _apply(phone: str, decision: WelcomeDecision, loaded: dict[str, Any]) 
     if action == "confirm_homeowner":
         await homeowner_store.ensure(phone)
         await conversation_state_store.clear(phone)
-        await whatsapp_service.send_text_message(phone, HOMEOWNER_READY)
+        await whatsapp_service.send_text_message(phone, _homeowner_ready())
         await log_event(
             phone=phone,
             role="homeowner",
@@ -668,7 +682,7 @@ async def _apply(phone: str, decision: WelcomeDecision, loaded: dict[str, Any]) 
     if action == "default_homeowner":
         await homeowner_store.ensure(phone)
         await conversation_state_store.clear(phone)
-        await whatsapp_service.send_text_message(phone, HOMEOWNER_READY)
+        await whatsapp_service.send_text_message(phone, _homeowner_ready())
         await log_event(
             phone=phone,
             role="homeowner",
@@ -726,7 +740,7 @@ async def _apply(phone: str, decision: WelcomeDecision, loaded: dict[str, Any]) 
         return
 
     if action == "help_homeowner":
-        await whatsapp_service.send_text_message(phone, HELP_HOMEOWNER)
+        await whatsapp_service.send_text_message(phone, _homeowner_help())
         return
 
     if action == "help_pro":
@@ -734,7 +748,9 @@ async def _apply(phone: str, decision: WelcomeDecision, loaded: dict[str, Any]) 
         return
 
     if action == "status_homeowner_idle":
-        await whatsapp_service.send_text_message(phone, RETURNING_HOMEOWNER)
+        await whatsapp_service.send_text_message(
+            phone, RETURNING_HOMEOWNER if settings.customer_requests_enabled else _paused_homeowner()
+        )
         return
 
     if action == "status_homeowner_job" and job:

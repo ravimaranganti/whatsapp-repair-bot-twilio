@@ -82,6 +82,10 @@ class Settings(BaseSettings):
         default=False,
         description="Feature flag: send pro job alerts / brokered dispatch",
     )
+    customer_requests_enabled: bool = Field(
+        default=True,
+        description="When false, homeowners are not able to post a job. They get a diagnosis and Google listings.",
+    )
     feedback_enabled: bool = Field(
         default=False,
         description="Feature flag: DIY/job ratings and freeform feedback",

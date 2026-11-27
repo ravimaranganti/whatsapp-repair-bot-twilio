@@ -170,6 +170,12 @@ async def process_message(message: MessageContent, sender: str):
             )
             return
 
+        if not settings.customer_requests_enabled:
+            from app.services.customer_preview import handle_customer_preview
+
+            await handle_customer_preview(message, phone, state)
+            return
+
         # Homeowner stateful flows. A button that names a job is handled
         # even when the session is sitting on a different request.
         from app.services.homeowner_actions import parse_homeowner_payload

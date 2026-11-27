@@ -899,6 +899,9 @@ async def _ask_urgency(phone: str, job_id: str, issue: str, ctx: dict[str, Any])
 
 
 async def dispatch_job(phone: str, ctx: dict[str, Any]) -> None:
+    if not settings.customer_requests_enabled:
+        logger.info("customer requests are paused; not posting a job")
+        return
     phone_n = normalize_phone(phone)
     diag = Diagnosis.model_validate(ctx["diagnosis"])
     ho = await homeowner_store.ensure(phone_n)

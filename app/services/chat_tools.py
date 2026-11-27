@@ -145,6 +145,14 @@ async def execute_tool(
             }
 
         if name == "request_quotes":
+            if not settings.customer_requests_enabled:
+                return {
+                    "ok": False,
+                    "error": (
+                        "Job posting is paused while pros are onboarding. "
+                        "Do not offer to contact professionals."
+                    ),
+                }
             if not settings.dispatch_enabled:
                 return {
                     "ok": False,
